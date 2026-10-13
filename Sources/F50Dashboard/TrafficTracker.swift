@@ -22,14 +22,32 @@ struct PersistedState: Codable {
     var buckets: [String: Bucket] = [:]
     var daily: [String: [String: Usage]] = [:]
     var alerts: [String: AlertRecord] = [:]
+    var billing: [String: [String: BillingUsage]] = [:]
 
     init() {}
-    private enum CodingKeys: String, CodingKey { case buckets, daily, alerts }
+    private enum CodingKeys: String, CodingKey { case buckets, daily, alerts, billing }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         buckets = try c.decode([String: Bucket].self, forKey: .buckets)
         daily = try c.decodeIfPresent([String: [String: Usage]].self, forKey: .daily) ?? [:]
         alerts = try c.decodeIfPresent([String: AlertRecord].self, forKey: .alerts) ?? [:]
+        billing = try c.decodeIfPresent([String: [String: BillingUsage]].self, forKey: .billing) ?? [:]
+        for records in billing.values {
+            for (key, record) in records {
+                guard TimeZone(identifier: record.period.timeZoneID) != nil,
+                      (1...31).contains(record.period.resetDay), record.period.start < record.period.end,
+                      record.period.start.timeIntervalSince1970 >= -62_135_596_800,
+                      record.period.end.timeIntervalSince1970 <= 253_402_300_800,
+                      key == record.period.key,
+                      record.observedSince >= record.period.start, record.observedSince < record.period.end,
+                      record.lastSampleAt >= record.period.start, record.lastSampleAt < record.period.end,
+                      record.calibratedAt.map({ $0 >= record.period.start && $0 < record.period.end }) ?? true,
+                      record.counterResets >= 0, record.counterResets < 1_000_000,
+                      !record.lastRx.addingReportingOverflow(record.lastTx).overflow else {
+                    throw ConfigError(message: "套餐周期记录无效")
+                }
+            }
+        }
         var aggregate: UInt64 = 0
         for bucket in buckets.values {
             let total = bucket.rx.addingReportingOverflow(bucket.tx)
@@ -173,23 +191,42 @@ struct TrafficTracker {
     mutating func didSave() { dirty = false }
     mutating func markDirty() { dirty = true }
 
+    func billingUsage(key: String, config: Config, date: Date) -> BillingUsage? {
+        guard let day = config.billingCycleDay else { return nil }
+        let period = BillingPeriod.containing(date, resetDay: day, timeZoneID: config.billingTimeZone)
+        return state.billing[key]?[period.key]
+    }
+
+    mutating func sampleBilling(_ info: RouterInfo, key: String, config: Config, date: Date,
+                                calibratedGB: Double? = nil) throws {
+        guard let day = config.billingCycleDay, key.hasPrefix("mac:"), info.isF50,
+              info.monthlyTotal != nil, let rx = info.monthlyRx, let tx = info.monthlyTx else {
+            if calibratedGB != nil { throw ConfigError(message: "请设置套餐重置日，并连接可识别的 F50 后校准") }
+            return
+        }
+        let period = BillingPeriod.containing(date, resetDay: day, timeZoneID: config.billingTimeZone)
+        var usage = state.billing[key]?[period.key] ?? BillingUsage(period: period, observedSince: date,
+            lastSampleAt: date, lastRx: rx, lastTx: tx, fields: info.usedFields)
+        if let usedGB = calibratedGB {
+            try usage.calibrate(usedGB: usedGB, rx: rx, tx: tx, fields: info.usedFields, date: date)
+        } else {
+            try usage.sample(rx: rx, tx: tx, fields: info.usedFields, date: date,
+                             maxGap: max(120, config.routerPollSec * 3))
+        }
+        state.billing[key, default: [:]][period.key] = usage
+        dirty = true
+    }
+
+    mutating func billingQuotaAlert(key: String, config: Config, date: Date) -> Int? {
+        guard var usage = billingUsage(key: key, config: config, date: date) else { return nil }
+        let threshold = usage.quotaAlert(quotaGB: config.quotaGB)
+        if threshold != nil { state.billing[key]![usage.period.key] = usage; dirty = true }
+        return threshold
+    }
+
     static func dayKey(_ date: Date) -> String {
         let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
     }
 
-    /// 同一计数周期只提醒一次；计数下降后开始新周期。
-    mutating func quotaAlert(total: UInt64, quotaGB: Double, key: String) -> Int? {
-        var record = state.alerts[key] ?? AlertRecord()
-        if total < record.lastTotal { record.notified = [] }
-        record.lastTotal = total
-        let percent = Double(total) / Fmt.giga / quotaGB * 100
-        let threshold = [100, 90, 80].first { percent >= Double($0) && !record.notified.contains($0) }
-        if let threshold = threshold {
-            record.notified.append(contentsOf: [80, 90, 100].filter { $0 <= threshold && !record.notified.contains($0) })
-        }
-        state.alerts[key] = record
-        dirty = true
-        return threshold
-    }
 }

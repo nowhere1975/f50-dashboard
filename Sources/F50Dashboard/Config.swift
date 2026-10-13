@@ -9,6 +9,8 @@ struct Config: Codable, Equatable {
     var showRateInTitle = true
     var networkNames: [String: String] = [:]
     var enableQuotaAlerts = false
+    var billingCycleDay: Int?
+    var billingTimeZone = "Asia/Shanghai"
 
     static var supportDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -20,7 +22,7 @@ struct Config: Codable, Equatable {
     init() {}
     private enum CodingKeys: String, CodingKey {
         case quotaGB, routerGateway, interface, localPollSec, routerPollSec, showRateInTitle
-        case networkNames, enableQuotaAlerts
+        case networkNames, enableQuotaAlerts, billingCycleDay, billingTimeZone
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -32,6 +34,8 @@ struct Config: Codable, Equatable {
         showRateInTitle = try c.decodeIfPresent(Bool.self, forKey: .showRateInTitle) ?? true
         networkNames = try c.decodeIfPresent([String: String].self, forKey: .networkNames) ?? [:]
         enableQuotaAlerts = try c.decodeIfPresent(Bool.self, forKey: .enableQuotaAlerts) ?? false
+        billingCycleDay = try c.decodeIfPresent(Int.self, forKey: .billingCycleDay)
+        billingTimeZone = try c.decodeIfPresent(String.self, forKey: .billingTimeZone) ?? "Asia/Shanghai"
         try validate()
     }
 
@@ -40,6 +44,8 @@ struct Config: Codable, Equatable {
             if !condition { throw ConfigError(message: message) }
         }
         try require(quotaGB.isFinite && quotaGB > 0 && quotaGB <= 1_000_000, "quotaGB 必须大于 0，且不超过 1000000 GB")
+        try require(billingCycleDay.map { (1...31).contains($0) } ?? true, "套餐重置日必须为 1–31，或留空")
+        try require(TimeZone(identifier: billingTimeZone) != nil, "套餐时区无效")
         try require(localPollSec.isFinite && (1...60).contains(localPollSec), "localPollSec 必须为 1–60 秒")
         try require(routerPollSec.isFinite && (5...3600).contains(routerPollSec), "routerPollSec 必须为 5–3600 秒")
         try require(interface == "auto" || (!interface.isEmpty && interface.utf8.count < 16
@@ -73,6 +79,7 @@ struct Config: Codable, Equatable {
         }
         let current = try JSONSerialization.jsonObject(with: encoder.encode(self)) as! [String: Any]
         object.merge(current) { _, new in new }
+        if billingCycleDay == nil { object.removeValue(forKey: "billingCycleDay") }
         try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
             .write(to: url, options: .atomic)
     }

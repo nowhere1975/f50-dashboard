@@ -7,7 +7,7 @@
 > `wa_inner_version = F50ProV1.0.0B27`，`cr_version = MU3356V1.0.0B27`。
 > 未验证的推断已明确标注。
 >
-> **0.2 口径说明**：月度字段实际来自路由器计数。尚未证明其在所有计费周期、重置与固件条件下等于运营商账单，界面称为「路由器本周期用量」，余量仅作估算。
+> **0.3 口径修正**：月度字段来自可清零的设备计数，界面称为「设备当前计数」。2026-10-14 实测设备开启每月 1 日清零，但同一天的历史采样也出现 GB 级降至 MB 级，且十余分钟内再次下降；具体下降原因未确认。套餐月度周期须单独配置，并由运营商已用量校准，不再直接用该字段除以额度表示月度消耗。
 
 ---
 
@@ -146,10 +146,12 @@ curl -s -b cookies.txt "http://$GW/goform/goform_get_cmd_process?isTest=false&cm
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `flux_monthly_tx_bytes` | number | 本计费周期上传字节 |
-| `flux_monthly_rx_bytes` | number | 本计费周期下载字节 |
+| `flux_monthly_tx_bytes` | number | 设备上传累计字节，可在套餐月内清零 |
+| `flux_monthly_rx_bytes` | number | 设备下载累计字节，可在套餐月内清零 |
 | `monthly_tx_bytes` / `monthly_rx_bytes` | number | 同上（本机实测与 flux_ 完全一致） |
-| `monthly_time` / `flux_monthly_time` | number | 周期相关秒数，含义未确认 |
+| `monthly_time` / `flux_monthly_time` | number | WebUI 映射为 `monthlyConnectedTime`，不提供套餐起止日期 |
+| `flux_auto_clear_flow_data_switch` | string | WebUI 自动清零开关，本机为 `"on"` |
+| `flux_clear_date` | string | WebUI 每月自动清零日，本机为 `"1"`；不证明运营商套餐同日重置 |
 | `Z5g_rsrp` | string | 5G 参考信号接收功率，单位 dBm（如 `"-82"`） |
 | `network_type` | string | `"5G"` / `"4G"` 等 |
 | `network_signalbar` | number | 信号格数，0–5 |

@@ -14,8 +14,10 @@ struct RouterInfo {
     var wanIP = ""
     var stations: [(mac: String, ip: String)] = []
     var errorMessage: String?
+    var autoClearDay: Int?
 
     var isF50: Bool { model.lowercased().hasPrefix("f50") }
+    // 固件将该计数命名为 monthly；它可在套餐周期内清零，不代表完整月度账单。
     var monthlyTotal: UInt64? {
         guard let rx = monthlyRx, let tx = monthlyTx else { return nil }
         let result = rx.addingReportingOverflow(tx)
@@ -35,7 +37,8 @@ enum RouterClient {
     private static let fwCandidates = ["cr_version", "wa_inner_version"]
     private static var allFields: [String] {
         Array(Set(txCandidates + rxCandidates + rsrpCandidates + typeCandidates
-            + barCandidates + ipCandidates + modelCandidates + fwCandidates + ["station_list"])).sorted()
+            + barCandidates + ipCandidates + modelCandidates + fwCandidates
+            + ["station_list", "flux_auto_clear_flow_data_switch", "flux_clear_date"])).sorted()
     }
 
     static func url(gateway: String) -> URL? {
@@ -105,6 +108,8 @@ enum RouterClient {
         info.model = first(modelCandidates); info.firmware = first(fwCandidates)
         info.rsrp = first(rsrpCandidates); info.netType = first(typeCandidates)
         info.sigBar = first(barCandidates); info.wanIP = first(ipCandidates)
+        if ["on", "1"].contains(str("flux_auto_clear_flow_data_switch").lowercased()),
+           let day = Int(str("flux_clear_date")), (1...31).contains(day) { info.autoClearDay = day }
         if let list = object["station_list"] as? [[String: Any]] {
             info.stations = list.map { (mac: $0["mac_addr"] as? String ?? "?",
                                        ip: $0["ip_addr"] as? String ?? "?") }

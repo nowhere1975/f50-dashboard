@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var stateWarning: String?
     private var saveWarning: String?
     private var notificationWarning: String?
+    private var billingWarning: String?
     private var notificationsAllowed = false
     private var lastSavedAt: Date?
     private var settingsController: SettingsController?
@@ -46,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         statusItem.button?.title = "↓  --- ↑  ---"
-        statusItem.button?.toolTip = "F50 Dashboard 0.2.1"
+        statusItem.button?.toolTip = "F50 Dashboard \(appVersion)"
         menu.delegate = self
         statusItem.menu = menu
         networkObserver.onChange = { [weak self] in self?.networkChanged() }
@@ -168,7 +169,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 if info.isF50 {
                     self.tracker.setLabel("F50 Pro", for: request.network.key)
                     self.mergeLegacyF50IfPossible()
-                    self.checkQuotaAlert(info, key: request.network.key)
+                    if self.configWarning == nil {
+                        do {
+                            try self.tracker.sampleBilling(info, key: request.network.key, config: self.config, date: Date())
+                            self.billingWarning = nil
+                            self.checkQuotaAlert(key: request.network.key)
+                        } catch { self.billingWarning = error.localizedDescription }
+                    }
                 }
                 self.rebuildIfOpen()
             }
@@ -250,19 +257,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(.separator())
         if let info = router.info, info.isF50 {
             if let total = info.monthlyTotal {
-                if configWarning != nil {
-                    add("路由器本周期  \(Fmt.bytes(total))")
-                    add("  配置未加载，暂不估算余量")
-                } else {
-                let used = Double(total) / Fmt.giga
-                let percent = used / config.quotaGB * 100
-                add("路由器本周期  \(Fmt.bytes(total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%")
-                add("  估算剩余    \(String(format: "%.2f", max(0, config.quotaGB - used))) GB")
+                add("设备当前计数  \(Fmt.bytes(total))")
                 add("  下载/上传   \(Fmt.bytes(info.monthlyRx!)) / \(Fmt.bytes(info.monthlyTx!))")
-                add("  \(Fmt.bar(percent))")
-                add("  套餐余量以运营商查询结果为准")
-                }
-            } else { add("路由器用量    字段缺失或无效，暂不估算余量") }
+                if let day = info.autoClearDay { add("  设备设置每月 \(day) 日清零；也可能在月内清零") }
+                addBillingUsage()
+            } else { add("设备当前计数  字段缺失或无效，暂不估算余量") }
             if let date = router.updatedAt {
                 let age = Int(max(0, Date().timeIntervalSince(date)))
                 add("  更新于      \(DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .medium))（\(age) 秒前）")
@@ -300,7 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             add("  \(name(for: key))  ↓ \(Fmt.bytes(bucket.rx))  ↑ \(Fmt.bytes(bucket.tx))")
         }
         if let counters = tracker.counters { add("当前网卡累计  ↓ \(Fmt.bytes(counters.rx))  ↑ \(Fmt.bytes(counters.tx))") }
-        for warning in [configWarning, stateWarning, saveWarning, notificationWarning].compactMap({ $0 }) {
+        for warning in [configWarning, stateWarning, saveWarning, notificationWarning, billingWarning].compactMap({ $0 }) {
             add("提示：\(warning)")
         }
         menu.addItem(.separator())
@@ -309,6 +308,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(item("打开数据目录", action: #selector(openData)))
         menu.addItem(item("刷新", action: #selector(doRefresh)))
         menu.addItem(item("退出", action: #selector(quit)))
+    }
+
+    private func addBillingUsage() {
+        guard configWarning == nil else { add("套餐月度用量  配置未加载，暂不估算余量"); return }
+        guard let day = config.billingCycleDay else {
+            add("月度套餐      \(Fmt.trim(config.quotaGB)) GB · 重置日尚未设置")
+            add("  请在设置中填写重置日和运营商本周期已用量")
+            return
+        }
+        let period = BillingPeriod.containing(Date(), resetDay: day, timeZoneID: config.billingTimeZone)
+        add("套餐周期      \(period.label)")
+        guard let key = tracker.context?.key,
+              let usage = tracker.billingUsage(key: key, config: config, date: Date()) else {
+            add("  月度已记录  尚未取得有效采样")
+            return
+        }
+        if usage.canEstimateQuota {
+            let used = Double(usage.total) / Fmt.giga
+            let percent = used / config.quotaGB * 100
+            add("  月度估算    \(Fmt.bytes(usage.total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%")
+            add("  估算剩余    \(String(format: "%.2f", max(0, config.quotaGB - used))) GB")
+            add("  \(Fmt.bar(percent))")
+            add("  套餐余量以运营商查询结果为准")
+        } else {
+            add("  月度已记录  \(Fmt.bytes(usage.total)) · \(Fmt.trim(config.quotaGB)) GB 套餐")
+            add(usage.calibratedAt == nil ? "  周期初始用量未知，请用运营商已用量校准"
+                : "  断采或设备清零可能漏记，请用运营商已用量校准")
+        }
+        if config.enableQuotaAlerts && !usage.canEstimateQuota { add("  月度配额提醒等待用量校准") }
     }
 
     private func saveState() {
@@ -322,16 +350,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             } catch { saveWarning = "累计保存失败：\(error.localizedDescription)" }
         }
         // 本地运行快照用于排查；不向外发送。
-        let status: [String: Any] = [
-            "version": "0.2.1", "pid": ProcessInfo.processInfo.processIdentifier,
+        var status: [String: Any] = [
+            "version": appVersion, "pid": ProcessInfo.processInfo.processIdentifier,
             "updatedAt": Date().timeIntervalSince1970,
             "networkKey": tracker.context?.key ?? "", "interface": tracker.context?.interface ?? "",
             "localPollSec": config.localPollSec, "routerPollSec": config.routerPollSec,
             "routerModel": router.info?.model ?? "",
             "routerUsageValid": router.info?.isF50 == true && router.info?.monthlyTotal != nil,
             "lastSavedAt": lastSavedAt?.timeIntervalSince1970 ?? 0,
-            "warnings": [configWarning, stateWarning, saveWarning, notificationWarning].compactMap { $0 }
+            "billingCycleDay": config.billingCycleDay ?? 0, "billingTimeZone": config.billingTimeZone,
+            "warnings": [configWarning, stateWarning, saveWarning, notificationWarning, billingWarning].compactMap { $0 }
         ]
+        if let total = router.info?.monthlyTotal { status["routerCounterBytes"] = total }
+        if let key = tracker.context?.key, let usage = tracker.billingUsage(key: key, config: config, date: Date()) {
+            status["billingPeriod"] = usage.period.label
+            status["billingRecordedBytes"] = usage.total
+            status["billingQuotaReady"] = usage.canEstimateQuota
+        }
         if let data = try? JSONSerialization.data(withJSONObject: status, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: Config.supportDir.appendingPathComponent("runtime.json"), options: .atomic)
         }
@@ -348,19 +383,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    private func checkQuotaAlert(_ info: RouterInfo, key: String) {
-        guard configWarning == nil, config.enableQuotaAlerts, notificationsAllowed, let total = info.monthlyTotal else { return }
-        let previous = tracker.state.alerts[key]
-        guard let threshold = tracker.quotaAlert(total: total, quotaGB: config.quotaGB, key: key) else { return }
+    private func checkQuotaAlert(key: String) {
+        let now = Date()
+        guard configWarning == nil, config.enableQuotaAlerts, notificationsAllowed,
+              let previous = tracker.billingUsage(key: key, config: config, date: now),
+              let threshold = tracker.billingQuotaAlert(key: key, config: config, date: now) else { return }
         let content = UNMutableNotificationContent()
         content.title = "F50 用量达到配置额度的 \(threshold)%"
-        content.body = "路由器本周期用量 \(Fmt.bytes(total))，配置额度 \(Fmt.trim(config.quotaGB)) GB。实际余量请查询运营商。"
+        content.body = "\(previous.period.label)，月度估算用量 \(Fmt.bytes(previous.total))，套餐额度 \(Fmt.trim(config.quotaGB)) GB。实际余量请查询运营商。"
         content.sound = .default
+        let submitted = tracker.state.billing[key]?[previous.period.key]?.notified
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { [weak self] error in
             guard let error = error else { return }
             DispatchQueue.main.async {
-                self?.tracker.state.alerts[key] = previous
+                // 只恢复这次失败的提醒，保留提交通知后的流量采样。
+                if self?.tracker.state.billing[key]?[previous.period.key]?.notified == submitted {
+                    self?.tracker.state.billing[key]?[previous.period.key]?.notified = previous.notified
+                }
                 self?.tracker.markDirty()
                 self?.notificationWarning = "配额提醒发送失败：\(error.localizedDescription)"
             }
@@ -374,8 +414,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     @objc private func openSettings() {
-        settingsController = SettingsController(config: config, networkKey: tracker.context?.key) { [weak self] next in
+        let settingsNetwork = tracker.context?.key
+        settingsController = SettingsController(config: config, networkKey: settingsNetwork) { [weak self] next, usedGB in
             guard let self = self else { return }
+            var candidate = self.tracker
+            if let usedGB = usedGB {
+                let now = Date()
+                guard let context = self.tracker.context,
+                      context.key == settingsNetwork,
+                      SysInfo.networkContext(interface: self.config.interface) == context,
+                      self.config.interface == next.interface, self.config.routerGateway == next.routerGateway,
+                      let info = self.router.info, info.isF50, let sampledAt = self.router.updatedAt,
+                      now.timeIntervalSince(sampledAt) >= 0,
+                      now.timeIntervalSince(sampledAt) <= min(60, max(10, self.config.routerPollSec * 2)) else {
+                    throw ConfigError(message: "请连接 F50 并刷新设备读数，再填写运营商当前已用量；网卡或管理地址请另行保存")
+                }
+                try candidate.sampleBilling(info, key: context.key, config: next, date: now, calibratedGB: usedGB)
+            }
+            try next.save()
+            self.tracker = candidate
             let enable = next.enableQuotaAlerts
             self.applyConfig(next)
             if enable {

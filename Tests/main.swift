@@ -162,11 +162,119 @@ do {
            "failed migration changes neither record")
 }
 
+let iso = ISO8601DateFormatter()
+func at(_ text: String) -> Date { iso.date(from: text)! }
+let october = at("2026-10-14T02:00:00+08:00")
+func period(_ date: Date, _ day: Int) -> BillingPeriod {
+    BillingPeriod.containing(date, resetDay: day, timeZoneID: "Asia/Shanghai")
+}
+expect(period(october, 1).label == "2026-10-01 至 2026-10-31", "calendar month is explicit")
+expect(period(october, 15).label == "2026-09-15 至 2026-10-14", "non-first billing day")
+expect(period(at("2026-10-15T00:00:00+08:00"), 15).label == "2026-10-15 至 2026-11-14", "exact boundary starts new cycle")
+expect(period(at("2026-02-28T00:00:00+08:00"), 31).label == "2026-02-28 至 2026-03-30", "short month clamps without shifting following month")
+expect(period(at("2024-02-29T00:00:00+08:00"), 31).label == "2024-02-29 至 2024-03-30", "leap month")
+expect(period(at("2027-01-01T00:00:00+08:00"), 15).label == "2026-12-15 至 2027-01-14", "year rollover")
+expect(period(at("2026-10-31T16:00:00Z"), 1).label == "2026-11-01 至 2026-11-30", "billing timezone independent of machine timezone")
+expect(rejects(#"{"billingCycleDay":0}"#) && rejects(#"{"billingCycleDay":32}"#), "billing day bounds")
+expect(rejects(#"{"billingTimeZone":"invalid/timezone"}"#), "invalid billing timezone rejected")
+expect(Config().billingCycleDay == nil, "old config does not invent carrier period")
+var monthlyConfig = Config(); monthlyConfig.billingCycleDay = 1
+try monthlyConfig.save(to: configURL)
+try Config().save(to: configURL)
+expect((try JSONDecoder().decode(Config.self, from: Data(contentsOf: configURL))).billingCycleDay == nil, "clearing billing day removes saved value")
+expect(parse(#"{"wa_inner_version":"F50ProV1","flux_auto_clear_flow_data_switch":"on","flux_clear_date":"1"}"#).autoClearDay == 1, "device automatic reset setting parsed")
+expect(parse(#"{"wa_inner_version":"F50ProV1","flux_auto_clear_flow_data_switch":"off","flux_clear_date":"1"}"#).autoClearDay == nil, "disabled reset not shown as active")
+
+func reading(_ rx: UInt64, _ tx: UInt64, fields: String = "same-fields") -> RouterInfo {
+    var info = RouterInfo(); info.responded = true; info.model = "F50ProV1"
+    info.monthlyRx = rx; info.monthlyTx = tx; info.usedFields = fields
+    return info
+}
+var monthly = TrafficTracker()
+try monthly.sampleBilling(reading(5_000_000_000, 2_000_000_000), key: f50.key, config: Config(), date: october)
+expect(monthly.state.billing.isEmpty, "unset cycle cannot report monthly percentage")
+try monthly.sampleBilling(reading(5_000_000_000, 2_000_000_000), key: f50.key, config: monthlyConfig, date: october)
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.total == 0, "first raw counter not assigned to unknown monthly history")
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.canEstimateQuota == false, "unknown initial usage suppresses quota")
+try monthly.sampleBilling(reading(5_000_000_100, 2_000_000_020), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(30))
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.total == 120, "both directions accumulated")
+try monthly.sampleBilling(reading(5_000_000_100, 2_000_000_020), key: f50.key, config: monthlyConfig,
+                          date: october.addingTimeInterval(30), calibratedGB: 7)
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.total == 7_000_000_000, "carrier calibration replaces partial total")
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.canEstimateQuota == true, "calibrated cycle can estimate quota")
+let billingURL = temp.appendingPathComponent("billing-state.json")
+let billingStore = StateStore(url: billingURL)
+try billingStore.save(monthly.state)
+monthly.state = billingStore.load().state
+try monthly.sampleBilling(reading(5_000_000_100, 2_000_000_020), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(60))
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.total == 7_000_000_000, "restart never recounts old device counter")
+try monthly.sampleBilling(reading(50, 2_000_000_040), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(90))
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.total == 7_000_000_070, "one-sided reset preserves monthly total and adds post-reset bytes")
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.hasGap == true, "reset warns of unobservable traffic before clearing")
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.canEstimateQuota == false, "reset cannot fabricate exact monthly remainder")
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.period == period(october, 1), "device reset does not change billing cycle")
+try monthly.sampleBilling(reading(80, 2_000_000_050), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(120))
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.total == 7_000_000_110, "sampling continues after reset")
+try monthly.sampleBilling(reading(90, 2_000_000_060, fields: "new-fields"), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(150))
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.total == 7_000_000_110, "field-source change never creates historical spike")
+try monthly.sampleBilling(reading(100, 2_000_000_070, fields: "new-fields"), key: f50.key, config: monthlyConfig,
+                          date: october.addingTimeInterval(180), calibratedGB: 8)
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.canEstimateQuota == true, "new carrier calibration repairs unknown interval")
+try monthly.sampleBilling(reading(200, 2_000_000_170, fields: "new-fields"), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(400))
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.total == 8_000_000_200, "long gap retains observed delta")
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: october)?.canEstimateQuota == false, "long gap suppresses precise remainder")
+let november = at("2026-11-01T00:00:05+08:00")
+try monthly.sampleBilling(reading(9_000_000_000, 4_000_000_000), key: f50.key, config: monthlyConfig, date: november)
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: november)?.total == 0, "new calendar cycle cannot import previous-month raw count")
+expect(monthly.state.billing[f50.key]?.count == 2, "previous billing cycle preserved")
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: november)?.canEstimateQuota == false, "new cycle needs known initial usage")
+try monthly.sampleBilling(reading(0, 0), key: home.key, config: monthlyConfig, date: november, calibratedGB: 0)
+expect(monthly.billingUsage(key: home.key, config: monthlyConfig, date: november)?.canEstimateQuota == true, "zero carrier usage is valid")
+expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: november)?.calibratedAt == nil, "different router calibrations remain isolated")
+let beforeInvalid = monthly.billingUsage(key: f50.key, config: monthlyConfig, date: november)?.total
+do {
+    try monthly.sampleBilling(reading(0, 0), key: f50.key, config: monthlyConfig, date: november, calibratedGB: -1)
+    expect(false, "negative carrier calibration must fail")
+} catch { expect(monthly.billingUsage(key: f50.key, config: monthlyConfig, date: november)?.total == beforeInvalid, "invalid calibration leaves state untouched") }
+
 var alert = TrafficTracker()
-expect(alert.quotaAlert(total: 80_000_000_000, quotaGB: 100, key: "f50") == 80, "80 percent alert")
-expect(alert.quotaAlert(total: 81_000_000_000, quotaGB: 100, key: "f50") == nil, "alert not repeated")
-expect(alert.quotaAlert(total: 95_000_000_000, quotaGB: 100, key: "f50") == 90, "90 percent alert")
-expect(alert.quotaAlert(total: 100_000_000_000, quotaGB: 100, key: "f50") == 100, "100 percent alert")
-_ = alert.quotaAlert(total: 0, quotaGB: 100, key: "f50")
-expect(alert.quotaAlert(total: 85_000_000_000, quotaGB: 100, key: "f50") == 80, "counter cycle resets alerts")
+try alert.sampleBilling(reading(0, 0), key: f50.key, config: monthlyConfig, date: october, calibratedGB: 80)
+expect(alert.billingQuotaAlert(key: f50.key, config: monthlyConfig, date: october) == 80, "monthly 80 percent alert")
+expect(alert.billingQuotaAlert(key: f50.key, config: monthlyConfig, date: october) == nil, "monthly alert not repeated")
+try alert.sampleBilling(reading(1, 1), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(30), calibratedGB: 95)
+expect(alert.billingQuotaAlert(key: f50.key, config: monthlyConfig, date: october) == 90, "monthly 90 percent alert")
+try alert.sampleBilling(reading(0, 0), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(60))
+expect(alert.billingQuotaAlert(key: f50.key, config: monthlyConfig, date: october) == nil, "raw counter reset neither repeats nor enables quota alerts")
+try alert.sampleBilling(reading(0, 0), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(90), calibratedGB: 95)
+expect(alert.billingQuotaAlert(key: f50.key, config: monthlyConfig, date: october) == nil, "same-cycle recalibration preserves notified thresholds")
+try alert.sampleBilling(reading(0, 0), key: f50.key, config: monthlyConfig, date: october.addingTimeInterval(120), calibratedGB: 100)
+expect(alert.billingQuotaAlert(key: f50.key, config: monthlyConfig, date: october) == 100, "monthly 100 percent alert")
+try alert.sampleBilling(reading(0, 0), key: f50.key, config: monthlyConfig, date: november, calibratedGB: 85)
+expect(alert.billingQuotaAlert(key: f50.key, config: monthlyConfig, date: november) == 80, "only new calendar period resets notification thresholds")
+try billingStore.save(alert.state)
+expect(billingStore.load().state.billing[f50.key]?.count == 2, "billing records and alerts survive disk round trip")
+var actualPlan = Config(); actualPlan.quotaGB = 200; actualPlan.billingCycleDay = 1
+var actualTracker = TrafficTracker()
+try actualTracker.sampleBilling(reading(28_000_000, 27_000_000), key: f50.key, config: actualPlan,
+                                date: october, calibratedGB: actualPlan.quotaGB - 173.93)
+let actualUsage = actualTracker.billingUsage(key: f50.key, config: actualPlan, date: october)!
+expect(actualUsage.total == 26_070_000_000 && actualUsage.canEstimateQuota, "200 GB plan with 173.93 remaining calibrates to 26.07 GB")
+expect(String(format: "%.2f", Double(actualUsage.total) / Fmt.giga / actualPlan.quotaGB * 100) == "13.04", "actual plan percentage is 13.04 rather than device 0.05")
+var overflowBilling = actualTracker
+overflowBilling.state.billing[f50.key]![actualUsage.period.key]!.total = UInt64.max - 5
+do {
+    try overflowBilling.sampleBilling(reading(28_000_010, 27_000_000), key: f50.key, config: actualPlan, date: october.addingTimeInterval(30))
+    expect(false, "billing overflow must fail")
+} catch { expect(overflowBilling.billingUsage(key: f50.key, config: actualPlan, date: october)?.total == UInt64.max - 5, "overflow preserves original monthly record") }
+let stateJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(actualTracker.state)) as! [String: Any]
+var corruptBilling = stateJSON
+var corruptRecords = corruptBilling["billing"] as! [String: Any]
+var corruptDevice = corruptRecords[f50.key] as! [String: Any]
+var corruptRecord = corruptDevice[actualUsage.period.key] as! [String: Any]
+var corruptPeriod = corruptRecord["period"] as! [String: Any]
+corruptPeriod["timeZoneID"] = "invalid/timezone"
+corruptRecord["period"] = corruptPeriod; corruptDevice[actualUsage.period.key] = corruptRecord
+corruptRecords[f50.key] = corruptDevice; corruptBilling["billing"] = corruptRecords
+expect((try? JSONDecoder().decode(PersistedState.self, from: JSONSerialization.data(withJSONObject: corruptBilling))) == nil,
+       "corrupt billing timezone rejected before period rendering")
 print("PASS: \(checks) Swift regression checks")

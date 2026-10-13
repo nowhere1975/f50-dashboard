@@ -1,6 +1,6 @@
 import Cocoa
 
-let appVersion = "0.2.1"
+let appVersion = "0.3.0"
 
 func printCheck() -> Bool {
     let loaded = Config.read()
@@ -8,7 +8,11 @@ func printCheck() -> Bool {
     print("── F50 Dashboard \(appVersion) ──")
     print("  配置文件    \(Config.fileURL.path)")
     if let warning = loaded.warning { print("  提示        \(warning)") }
-    print("  套餐额度    \(Fmt.trim(config.quotaGB)) GB（用于估算）")
+    print("  月度套餐    \(Fmt.trim(config.quotaGB)) GB")
+    if let day = config.billingCycleDay {
+        let period = BillingPeriod.containing(Date(), resetDay: day, timeZoneID: config.billingTimeZone)
+        print("  套餐周期    \(period.label)（\(config.billingTimeZone)）")
+    } else { print("  套餐周期    重置日尚未设置，暂不估算月度余量") }
     let context = SysInfo.networkContext(interface: config.interface)
     print("── 网络（原生系统接口）──")
     print("  当前网卡    \(context.interface.isEmpty ? "无" : context.interface)")
@@ -36,11 +40,22 @@ func printCheck() -> Bool {
     print("  型号 / 固件 \(response.model) / \(response.firmware)")
     if let error = response.errorMessage { print("  提示        \(error)") }
     if response.isF50, let total = response.monthlyTotal {
-        let percent = Double(total) / Fmt.giga / config.quotaGB * 100
         print("  命中字段    \(response.usedFields)")
-        if loaded.warning == nil {
-            print("  本周期用量  \(Fmt.bytes(total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%")
-        } else { print("  本周期用量  \(Fmt.bytes(total))（配置未加载，暂不估算余量）") }
+        print("  设备计数    \(Fmt.bytes(total))（可在套餐周期内清零）")
+        if let day = response.autoClearDay { print("  自动清零    设备设置每月 \(day) 日") }
+        var tracker = TrafficTracker()
+        let stateURL = Config.supportDir.appendingPathComponent("state.json")
+        // 诊断只读快照，不参与 App 的累计写入或恢复文件操作。
+        if let data = try? Data(contentsOf: stateURL), let state = try? JSONDecoder().decode(PersistedState.self, from: data) {
+            tracker.state = state
+            if let usage = tracker.billingUsage(key: context.key, config: config, date: Date()) {
+                print("  月度已记录  \(Fmt.bytes(usage.total))（上次采样 \(usage.lastSampleAt)）")
+                if loaded.warning == nil && usage.canEstimateQuota {
+                    let percent = Double(usage.total) / Fmt.giga / config.quotaGB * 100
+                    print("  月度估算    \(String(format: "%.2f", percent))%（已校准的保存快照）")
+                } else { print("  月度估算    暂不可用，请补齐初始用量或重新校准") }
+            }
+        }
         print("  原始字节    \(total)（下载 \(response.monthlyRx!) + 上传 \(response.monthlyTx!)）")
         print("  移动网络    \(response.netType) · \(response.sigBar)/5 · \(response.rsrp) dBm")
         print("  接入设备    \(response.stations.count) 台")
