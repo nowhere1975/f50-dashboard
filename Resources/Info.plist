@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>              <string>F50Dashboard</string>
+    <key>CFBundleDisplayName</key>       <string>F50 Dashboard</string>
+    <key>CFBundleIdentifier</key>        <string>io.github.nowhere1975.f50dashboard</string>
+    <key>CFBundleExecutable</key>        <string>F50Dashboard</string>
+    <key>CFBundleVersion</key>           <string>__VERSION__</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundlePackageType</key>       <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>LSMinimumSystemVersion</key>    <string>12.0</string>
+
+    <!-- 只驻留菜单栏，不显示 Dock 图标、不抢焦点 -->
+    <key>LSUIElement</key>               <true/>
+    <key>NSHighResolutionCapable</key>   <true/>
+
+    <!-- 说明用途：只读取本机接口计数与路由器状态，不采集任何个人数据 -->
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT License. 非官方第三方工具，与中兴通讯无关联。</string>
+</dict>
+</plist>

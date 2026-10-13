@@ -1,0 +1,18 @@
+# 构建产物
+build/
+*.app/
+*.o
+*.dSYM/
+
+# 用户本地配置（绝不能提交——里面有各自的配额和网关）
+config.json
+*.local.json
+
+# macOS
+.DS_Store
+._*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
