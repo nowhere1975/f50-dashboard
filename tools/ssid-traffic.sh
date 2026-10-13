@@ -2,9 +2,9 @@
 # 按「接入的网络」记录流量消耗
 #
 # 网络标识优先级：
-#   ① SSID        —— 需位置服务权限；本机当前被 redacted，脚本会自动探测
-#   ② 网关 MAC     —— 免权限、唯一、稳定（同一路由器永远同一个值）
-#   ③ 网关 IP      —— 最后兜底
+#   ① 网关 MAC —— 不可用时退回网关 IP
+#   ② 网关 IP —— 相同地址的网络可能合并；不读取 SSID
+# 网络切换、计数重置和过长间隔均重建基线。
 #
 # 用法：
 #   ./ssid-traffic.sh sample     采一次样（cron 用这个）
@@ -15,8 +15,8 @@
 
 set -u
 IF="${SSID_TRAFFIC_IF:-en0}"
-CSV="$HOME/inbox/ssid-traffic.csv"
-STATE="$HOME/inbox/.ssid-traffic.state"
+CSV="${SSID_TRAFFIC_CSV:-$HOME/inbox/ssid-traffic.csv}"
+STATE="${SSID_TRAFFIC_STATE:-$HOME/inbox/.ssid-traffic.state}"
 # 友好名映射表：每行 "键<TAB>名字"。键可以是 gwmac|xx:xx:.. 或 ssid|网络名
 NAMES="$HOME/inbox/ssid-names.tsv"
 
@@ -32,33 +32,19 @@ friendly_name() {
 }
 
 # ---------- 取当前网络标识 ----------
-get_ssid() {
-  local s
-  # 方式 1：networksetup（中英文都要匹配）
-  s=$(networksetup -getairportnetwork "$IF" 2>/dev/null \
-      | sed -n 's/^Current Wi-Fi Network: //p; s/^当前 Wi-Fi 网络：//p')
-  # 方式 2：system_profiler
-  if [ -z "$s" ] || [ "$s" = "<redacted>" ]; then
-    s=$(system_profiler SPAirPortDataType 2>/dev/null \
-        | awk '/Current Network Information:/{getline; gsub(/^[ \t]+/,""); sub(/:$/,""); print; exit}')
-  fi
-  case "$s" in ""|"<redacted>"|"Network Type: Infrastructure") s="" ;; esac
-  printf '%s' "$s"
-}
-
-get_gw()      { route -n get default 2>/dev/null | awk '/gateway/{print $2}'; }
-get_gw_mac()  {
+# 不读取 SSID，也不请求位置权限。
+get_gw() { /sbin/route -n get default 2>/dev/null | awk '/gateway:/{print $2}'; }
+get_gw_mac() {
   local gw; gw=$(get_gw)
-  [ -z "$gw" ] && return
-  ping -c1 -t1 "$gw" >/dev/null 2>&1
-  arp -n "$gw" 2>/dev/null | awk '{print $4}' | grep -E '^([0-9a-f]{1,2}:){5}' | head -1
+  [ -n "$gw" ] || return 0
+  /usr/sbin/arp -n "$gw" 2>/dev/null | awk '{print $4}' | \
+    python3 -c 'import sys; s=sys.stdin.read().strip(); p=s.split(":")
+try:
+ print(":".join("%02x"%int(x,16) for x in p) if len(p)==6 and all(0<=int(x,16)<=255 for x in p) else "")
+except ValueError: pass'
 }
-
-# 返回：<标识类型>|<标识值>
 get_netkey() {
-  local ssid mac gw
-  ssid=$(get_ssid)
-  if [ -n "$ssid" ]; then printf 'ssid|%s' "$ssid"; return; fi
+  local mac gw
   mac=$(get_gw_mac)
   if [ -n "$mac" ]; then printf 'gwmac|%s' "$mac"; return; fi
   gw=$(get_gw)
@@ -93,15 +79,16 @@ do_sample() {
   fi
 
   local d_in=0 d_out=0 dt=0
-  if [ -n "$prev_in" ]; then
+  if [ -n "$prev_in" ] && [ "$prev_key" = "$key" ]; then
     dt=$(( $(date -j -f '%Y-%m-%d %H:%M:%S' "$now" +%s) - $(date -j -f '%Y-%m-%d %H:%M:%S' "$prev_ts" +%s) ))
     d_in=$(( in_b - prev_in ));  d_out=$(( out_b - prev_out ))
     # 计数器回绕/接口重置 → 记为 0，避免负数污染统计
     [ "$d_in"  -lt 0 ] && d_in=0
     [ "$d_out" -lt 0 ] && d_out=0
-    [ "$dt"    -lt 0 ] && dt=0
+    if [ "$dt" -le 0 ] || [ "$dt" -gt "${SSID_TRAFFIC_MAX_GAP:-300}" ]; then d_in=0; d_out=0; dt=0; fi
   fi
 
+  mkdir -p "$(dirname "$CSV")" "$(dirname "$STATE")"
   # 表头
   [ -f "$CSV" ] || echo "timestamp,net_type,net_id,in_bytes,out_bytes,in_mb,out_mb,interval_s,total_in_mb,total_out_mb" > "$CSV"
 
@@ -109,7 +96,8 @@ do_sample() {
       -v di="$d_in" -v do_="$d_out" -v dt="$dt" -v ti="$in_b" -v to="$out_b" \
       'BEGIN{printf "%s,%s,%s,%d,%d,%.3f,%.3f,%d,%.1f,%.1f\n", ts,kt,kid,di,do_,di/1000000,do_/1000000,dt,ti/1000000,to/1000000}' >> "$CSV"
 
-  printf '%s\t%s\t%s\t%s\n' "$key" "$in_b" "$out_b" "$now" > "$STATE"
+  printf '%s\t%s\t%s\t%s\n' "$key" "$in_b" "$out_b" "$now" > "$STATE.tmp"
+  mv "$STATE.tmp" "$STATE"
 
   # 网络切换时提示
   if [ -n "$prev_key" ] && [ "$prev_key" != "$key" ]; then
@@ -170,16 +158,15 @@ do_now() {
   echo "  标识:   ${key%%|*} = ${key##*|}"
   echo "  网关:   $(get_gw)"
   echo "  本机:   $(ipconfig getifaddr "$IF" 2>/dev/null)"
-  echo "  出口:   $(curl -s --noproxy '*' -m 5 http://ip-api.com/line/?fields=query 2>/dev/null | head -1)"
   if [ -n "$raw" ]; then
     in_b=$(echo "$raw" | awk '{print $1}'); out_b=$(echo "$raw" | awk '{print $2}')
     echo "  累计:   下载 $(echo "$in_b" | awk '{printf "%.2f", $1/1000000000}') GB   上传 $(echo "$out_b" | awk '{printf "%.2f", $1/1000000000}') GB"
     if [ -f "$STATE" ]; then
       local pk pi po pts
       IFS=$'\t' read -r pk pi po pts < "$STATE" || true
-      if [ -n "$pi" ]; then
+      if [ -n "$pi" ] && [ "$pk" = "$key" ] && [ "$in_b" -ge "$pi" ] && [ "$out_b" -ge "$po" ]; then
         local dt=$(( $(date +%s) - $(date -j -f '%Y-%m-%d %H:%M:%S' "$pts" +%s) ))
-        if [ "$dt" -gt 0 ]; then
+        if [ "$dt" -gt 0 ] && [ "$dt" -le "${SSID_TRAFFIC_MAX_GAP:-300}" ]; then
           echo "  自上次采样（${dt}s 前）: 下载 $(( (in_b-pi)/1024 )) KB   上传 $(( (out_b-po)/1024 )) KB"
           echo "  平均速率: 下载 $(echo "$in_b $pi $dt" | awk '{printf "%.1f", ($1-$2)*8/1000000/$3}') Mbps   上传 $(echo "$out_b $po $dt" | awk '{printf "%.1f", ($1-$2)*8/1000000/$3}') Mbps"
         fi

@@ -1,107 +1,80 @@
 import Foundation
+import SystemConfiguration
+import Darwin
 
-/// 系统命令与网络信息的封装。
-///
-/// 所有外部命令的路径都通过 `findBin` 解析，绝不硬编码 —— 见 docs/PITFALLS.md
-/// 里记录的 `netstat` 在 `/usr/sbin` 而非 `/usr/bin` 的坑。
 enum SysInfo {
-
-    // MARK: - 命令执行
-
-    static func findBin(_ candidates: [String]) -> String {
-        for p in candidates where FileManager.default.isExecutableFile(atPath: p) { return p }
-        return candidates.first ?? ""
+    static func dictionary(_ key: String, store: SCDynamicStore?) -> [String: Any] {
+        guard let store = store else { return [:] }
+        return SCDynamicStoreCopyValue(store, key as CFString) as? [String: Any] ?? [:]
     }
 
-    @discardableResult
-    static func run(_ path: String, _ args: [String]) -> String {
-        guard !path.isEmpty else { return "" }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()          // 吞掉 stderr，避免污染菜单栏 App 的日志
-        do { try p.run() } catch { return "" }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(data: data, encoding: .utf8) ?? ""
-    }
-
-    static let netstat  = findBin(["/usr/sbin/netstat", "/usr/bin/netstat", "/bin/netstat"])
-    static let route    = findBin(["/sbin/route", "/usr/sbin/route", "/usr/bin/route"])
-    static let arp      = findBin(["/usr/sbin/arp", "/usr/bin/arp", "/sbin/arp"])
-    static let ping     = findBin(["/sbin/ping", "/usr/bin/ping", "/bin/ping"])
-    static let ipconfig = findBin(["/usr/sbin/ipconfig", "/usr/bin/ipconfig"])
-
-    // MARK: - 接口计数
-
-    /// 读某个网络接口自开机以来的累计收发字节。
-    /// 解析 `netstat -ib` 的 `<Link#N>` 汇总行 —— 该行才是接口总数，
-    /// 其它行是按协议/地址分列的。
-    static func ifaceCounters(_ iface: String) -> (rx: UInt64, tx: UInt64) {
-        for line in run(netstat, ["-ib"]).split(separator: "\n") {
-            let f = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-            // 列序: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
-            if f.count >= 11, f[0] == iface, f[2].hasPrefix("<Link") {
-                return (UInt64(f[6]) ?? 0, UInt64(f[9]) ?? 0)
-            }
+    /// 直接读系统网络状态，避免在主线程启动 route、ping、arp 进程。
+    static func networkContext(interface configured: String) -> NetworkContext {
+        let store = SCDynamicStoreCreate(nil, "F50Dashboard" as CFString, nil, nil)
+        let global = dictionary("State:/Network/Global/IPv4", store: store)
+        let iface = configured == "auto" ? (global["PrimaryInterface"] as? String ?? "") : configured
+        var ipv4: [String: Any] = [:]
+        var dns: [String: Any] = [:]
+        if let service = global["PrimaryService"] as? String {
+            ipv4 = dictionary("State:/Network/Service/\(service)/IPv4", store: store)
+            dns = dictionary("State:/Network/Service/\(service)/DNS", store: store)
         }
-        return (0, 0)
-    }
-
-    // MARK: - 网络路由信息
-
-    /// 默认网关地址。
-    static func defaultGateway() -> String {
-        for line in run(route, ["-n", "get", "default"]).split(separator: "\n") {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            if t.hasPrefix("gateway:") {
-                return t.replacingOccurrences(of: "gateway:", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-            }
-        }
-        return ""
-    }
-
-    /// 默认路由使用的接口名（en0 / en7 …）。
-    static func defaultInterface() -> String {
-        for line in run(route, ["-n", "get", "default"]).split(separator: "\n") {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            if t.hasPrefix("interface:") {
-                return t.replacingOccurrences(of: "interface:", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-            }
-        }
-        return "en0"
-    }
-
-    /// 该接口的第一个 DNS 服务器。用作网络指纹的一部分。
-    static func primaryDNS(_ iface: String) -> String {
-        let out = run(ipconfig, ["getoption", iface, "domain_name_server"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return out.split(separator: " ").first.map(String.init) ?? ""
-    }
-
-    /// 网关 MAC。
-    ///
-    /// 注意：在 macOS 上，从 App 进程里调用 `arp` **恒返回空**
-    /// （同为系统命令的 netstat / route / ipconfig / ndp 均正常，
-    /// 详见 docs/PITFALLS.md）。因此这个函数很可能拿不到值，
-    /// 调用方必须有降级方案。
-    static func gatewayMAC(_ gw: String) -> String {
-        guard !gw.isEmpty else { return "" }
-        run(ping, ["-c1", "-t1", gw])          // 先 ping 一次，确保 ARP 表里有记录
-        for line in run(arp, ["-n", gw]).split(separator: "\n") {
-            for tok in line.split(separator: " ", omittingEmptySubsequences: true) {
-                let s = String(tok)
-                if s.contains(":"),
-                   s.filter({ $0 != ":" }).count == 12,
-                   s.allSatisfy({ $0.isHexDigit || $0 == ":" }) {
-                    return s.lowercased()
+        if configured != "auto", ipv4["InterfaceName"] as? String != iface, let store = store,
+           let keys = SCDynamicStoreCopyKeyList(store, "State:/Network/Service/.*/IPv4" as CFString) as? [String] {
+            ipv4 = [:]; dns = [:]
+            for key in keys {
+                let candidate = dictionary(key, store: store)
+                if candidate["InterfaceName"] as? String == iface {
+                    ipv4 = candidate
+                    dns = dictionary(String(key.dropLast(4)) + "DNS", store: store)
+                    break
                 }
             }
         }
-        return ""
+        let gateway = ipv4["Router"] as? String ?? (configured == "auto" ? global["Router"] as? String ?? "" : "")
+        let servers = dns["ServerAddresses"] as? [String] ?? []
+        let mac = (ipv4["ARPResolvedIPAddress"] as? String == gateway)
+            ? normalizeMAC(ipv4["ARPResolvedHardwareAddress"] as? String ?? "") : ""
+        return NetworkContext(interface: iface, gateway: gateway, dns: servers.joined(separator: ","), gatewayMAC: mac)
+    }
+
+    static func normalizeMAC(_ value: String) -> String {
+        let parts = value.split(separator: ":")
+        guard parts.count == 6 else { return "" }
+        var bytes: [String] = []
+        for part in parts {
+            guard part.count <= 2, let byte = UInt8(part, radix: 16) else { return "" }
+            bytes.append(String(format: "%02x", byte))
+        }
+        return bytes.joined(separator: ":")
+    }
+
+    /// 后台读取 netstat 的 64 位累计，失败返回 nil，合法零值保留。
+    /// 当前系统的原生 sysctl 计数在第三方进程中与 netstat 不一致，因此采用实测可对齐的来源。
+    static func ifaceCounters(_ iface: String) -> InterfaceCounters? {
+        guard !iface.isEmpty else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/netstat")
+        process.arguments = ["-ibn", "-I", iface]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let deadline = DispatchWorkItem {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2, execute: deadline)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        deadline.cancel()
+        guard process.terminationStatus == 0, let output = String(data: data, encoding: .utf8) else { return nil }
+        for line in output.split(separator: "\n") {
+            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            if fields.count >= 11, fields[0] == iface, fields[2].hasPrefix("<Link"),
+               let rx = UInt64(fields[6]), let tx = UInt64(fields[9]) {
+                return InterfaceCounters(rx: rx, tx: tx)
+            }
+        }
+        return nil
     }
 }

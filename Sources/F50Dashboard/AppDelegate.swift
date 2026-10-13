@@ -1,265 +1,378 @@
 import Cocoa
+import UserNotifications
 
-/// 单个「接入网络」的累计量。
-/// 按网络分开记账是核心需求：5G 路由器有月度配额，
-/// 不能和手机热点 / 家里 Wi-Fi / 有线的流量混在一起。
-struct Bucket: Codable {
-    var rx: UInt64 = 0
-    var tx: UInt64 = 0
-    var firstSeen: Date = Date()
-    var label: String = ""
-}
-
-struct PersistedState: Codable {
-    var buckets: [String: Bucket] = [:]
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-
-    // MARK: - 组件
-
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private var localTimer: Timer?
-    private var netTimer: Timer?
     private var routerTimer: Timer?
-
-    // MARK: - 状态
-
-    private var config = Config.load()
-    private var router = RouterInfo()
-    private var buckets: [String: Bucket] = [:]
-    private var netKey = "none"
-
-    private var lastRx: UInt64 = 0
-    private var lastTx: UInt64 = 0
-    private var lastSample = Date()
-    private var rateRx: Double = 0
-    private var rateTx: Double = 0
-
-    private var iface: String { config.effectiveInterface }
-
-    // MARK: - 生命周期
+    private var saveTimer: Timer?
+    private var config = Config()
+    private var tracker = TrafficTracker()
+    private var router = RouterState()
+    private let store = StateStore()
+    private let networkObserver = NetworkObserver()
+    private var routerTask: URLSessionDataTask?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var signals: [DispatchSourceSignal] = []
+    private var instanceFD: Int32 = -1
+    private var menuOpen = false
+    private var configWarning: String?
+    private var stateWarning: String?
+    private var saveWarning: String?
+    private var notificationWarning: String?
+    private var notificationsAllowed = false
+    private var lastSavedAt: Date?
+    private var settingsController: SettingsController?
+    private let samplingQueue = DispatchQueue(label: "io.github.nowhere1975.f50dashboard.sampling")
+    private var samplePending = false
+    private var sampleGeneration: UInt64 = 0
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        do {
+            try FileManager.default.createDirectory(at: Config.supportDir, withIntermediateDirectories: true)
+            instanceFD = open(Config.supportDir.appendingPathComponent("instance.lock").path, O_CREAT | O_RDWR, 0o600)
+            guard instanceFD >= 0, flock(instanceFD, LOCK_EX | LOCK_NB) == 0 else {
+                if instanceFD >= 0 { close(instanceFD) }
+                instanceFD = -1
+                NSApp.terminate(nil); return
+            }
+        } catch { NSApp.terminate(nil); return }
+        let loaded = Config.read()
+        config = loaded.config; configWarning = loaded.warning
+        let state = store.load()
+        tracker.state = state.state; stateWarning = state.warning
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // 等宽字体：标题里补的空格才有固定宽度，菜单栏项不会随数字抖动
         statusItem.button?.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         statusItem.button?.title = "↓  --- ↑  ---"
+        statusItem.button?.toolTip = "F50 Dashboard 0.2.0"
         menu.delegate = self
         statusItem.menu = menu
-
-        loadState()
-        netKey = currentNetKey()
-        touchBucket(netKey)
-
-        let c = SysInfo.ifaceCounters(iface)
-        lastRx = c.rx; lastTx = c.tx; lastSample = Date()
-
-        localTimer = schedule(config.localPollSec) { [weak self] in self?.tick() }
-        netTimer   = schedule(10)                  { [weak self] in self?.checkNetwork() }
-        routerTimer = schedule(config.routerPollSec) { [weak self] in self?.refreshRouter() }
-
-        refreshRouter()
+        networkObserver.onChange = { [weak self] in self?.networkChanged() }
+        networkObserver.start()
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.sampleGeneration &+= 1
+                self?.tracker.resetBaseline()
+                self?.invalidateRouter()
+                if name == NSWorkspace.didWakeNotification { self?.tick(); self?.refreshRouter() }
+                else { self?.saveState() }
+            })
+        }
+        for number in [SIGTERM, SIGINT] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { [weak self] in self?.quit() }
+            source.resume()
+            signals.append(source)
+        }
+        UNUserNotificationCenter.current().delegate = self
+        refreshNotificationPermission()
+        rebuildTimers()
         tick()
+        refreshRouter()
+        saveState()
     }
 
-    func applicationWillTerminate(_ note: Notification) { saveState() }
+    func applicationWillTerminate(_ note: Notification) {
+        routerTask?.cancel()
+        if instanceFD >= 0 {
+            saveState()
+            flock(instanceFD, LOCK_UN)
+            close(instanceFD)
+        }
+    }
 
     private func schedule(_ sec: Double, _ body: @escaping () -> Void) -> Timer {
-        let t = Timer.scheduledTimer(withTimeInterval: sec, repeats: true) { _ in body() }
-        RunLoop.current.add(t, forMode: .common)
-        return t
+        let timer = Timer(timeInterval: sec, repeats: true) { _ in body() }
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
     }
 
-    // MARK: - 采样
+    private func rebuildTimers() {
+        localTimer?.invalidate(); routerTimer?.invalidate(); saveTimer?.invalidate()
+        localTimer = schedule(config.localPollSec) { [weak self] in self?.tick() }
+        routerTimer = schedule(config.routerPollSec) { [weak self] in self?.refreshRouter() }
+        saveTimer = schedule(30) { [weak self] in self?.saveState() }
+    }
 
-    /// 每 `localPollSec` 秒：算实时速率，并把这期间的增量记到「当前网络」的桶里。
     private func tick() {
-        let c = SysInfo.ifaceCounters(iface)
-        let now = Date()
-        let dt = now.timeIntervalSince(lastSample)
-
-        // 计数器单调递增；若变小说明接口重置或换网卡，跳过这次避免负数
-        if dt > 0, c.rx >= lastRx, c.tx >= lastTx {
-            let dRx = c.rx - lastRx
-            let dTx = c.tx - lastTx
-            rateRx = Double(dRx) / dt
-            rateTx = Double(dTx) / dt
-            buckets[netKey, default: Bucket()].rx += dRx
-            buckets[netKey, default: Bucket()].tx += dTx
+        let context = SysInfo.networkContext(interface: config.interface)
+        let changed = tracker.context != context
+        if changed {
+            saveState(); invalidateRouter()
+            sampleGeneration &+= 1
+            tracker.sample(context: context, counters: nil, uptime: ProcessInfo.processInfo.systemUptime,
+                           date: Date(), maxGap: max(30, config.localPollSec * 3))
+            updateTitle(); rebuildIfOpen(); refreshRouter()
         }
-        lastRx = c.rx; lastTx = c.tx; lastSample = now
-        updateTitle()
+        guard !samplePending else { return }
+        samplePending = true
+        let generation = sampleGeneration
+        samplingQueue.async { [weak self] in
+            let counters = SysInfo.ifaceCounters(context.interface)
+            let uptime = ProcessInfo.processInfo.systemUptime
+            let date = Date()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.samplePending = false
+                guard generation == self.sampleGeneration,
+                      SysInfo.networkContext(interface: self.config.interface) == context else {
+                    self.tick(); return
+                }
+                self.tracker.sample(context: context, counters: counters, uptime: uptime, date: date,
+                                    maxGap: max(30, self.config.localPollSec * 3))
+                self.updateTitle()
+                self.rebuildIfOpen()
+            }
+        }
     }
 
     private func updateTitle() {
-        if config.showRateInTitle {
-            statusItem.button?.title = "↓\(Fmt.rate(rateRx)) ↑\(Fmt.rate(rateTx))"
-        } else {
-            statusItem.button?.title = "↓\(Fmt.bytes(buckets[netKey]?.rx ?? 0))"
-        }
+        guard let button = statusItem?.button else { return }
+        if tracker.counters == nil { button.title = "↓  --- ↑  ---" }
+        else if config.showRateInTitle { button.title = "↓\(Fmt.rate(tracker.rateRx)) ↑\(Fmt.rate(tracker.rateTx))" }
+        else { button.title = "↓\(Fmt.bytes(tracker.state.buckets[tracker.context?.key ?? ""]?.rx ?? 0))" }
     }
 
-    /// 每 10 秒：网络是否换了。换了就换桶，并把速率清零（避免跨网络算出一个假速率）。
-    private func checkNetwork() {
-        let k = currentNetKey()
-        guard k != netKey else { return }
-        saveState()
-        netKey = k
-        touchBucket(k)
-        rateRx = 0; rateTx = 0
+    private func invalidateRouter() {
+        routerTask?.cancel(); routerTask = nil
+        router.invalidate()
     }
 
-    private func touchBucket(_ key: String) {
-        if buckets[key] == nil { buckets[key] = Bucket(firstSeen: Date()) }
+    private func networkChanged() {
+        // 系统通知可能早于下一次速率采样，先作废请求和基线。
+        invalidateRouter()
+        sampleGeneration &+= 1
+        tracker.resetBaseline()
+        tick()
+        refreshRouter()
     }
 
-    private func refreshRouter() {
-        let gw = config.effectiveGateway()
-        RouterClient.fetch(gateway: gw) { [weak self] info in
-            guard let self = self else { return }
-            self.router = info
-            if info.reachable {
-                // 用路由器自报的型号给桶打标签，比裸 MAC/IP 好认
-                let label = info.model.isEmpty ? "F50 Pro" : "F50 Pro (\(info.model))"
-                self.buckets[self.netKey, default: Bucket()].label = label
+    private func refreshRouter(force: Bool = false) {
+        guard let context = tracker.context else { return }
+        guard context.hasIPv4Gateway else { invalidateRouter(); rebuildIfOpen(); return }
+        if force { routerTask?.cancel() }
+        else if router.pending != nil { return }
+        let gateway = config.routerGateway == "auto" ? context.gateway : config.routerGateway
+        let request = router.begin(network: context, gateway: gateway)
+        routerTask = RouterClient.fetch(gateway: gateway) { [weak self] info in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let actual = SysInfo.networkContext(interface: self.config.interface)
+                guard actual == self.tracker.context else { self.networkChanged(); return }
+                guard self.router.accept(info, request: request, current: self.tracker.context, date: Date()) else { return }
+                self.routerTask = nil
+                if info.isF50 {
+                    self.tracker.setLabel("F50 Pro", for: request.network.key)
+                    self.checkQuotaAlert(info, key: request.network.key)
+                }
+                self.rebuildIfOpen()
             }
-            if !Thread.isMainThread { DispatchQueue.main.async { self.rebuildIfOpen() } }
         }
     }
 
-    // MARK: - 网络指纹
-
-    /// 当前网络的稳定标识。
-    ///
-    /// 用「默认网关 + DNS」组合，而不是 SSID（macOS 位置隐私会拦住）也不是网关 MAC
-    /// （App 进程里 `arp` 恒返回空，见 docs/PITFALLS.md）。
-    /// 若网关正好是 F50 Pro 的出厂地址且 DNS 指向自己，直接标记为独立的 "f50" 桶。
-    private func currentNetKey() -> String {
-        let gw = SysInfo.defaultGateway()
-        if gw.isEmpty { return "none" }
-        if Fmt.isRouterSignature(gw: gw, iface: iface) { return "f50" }
-        let mac = SysInfo.gatewayMAC(gw)
-        if !mac.isEmpty { return "mac:\(mac)" }
-        let dns = SysInfo.primaryDNS(iface)
-        return dns.isEmpty ? "gw:\(gw)" : "gw:\(gw)|dns:\(dns)"
+    private func applyConfig(_ next: Config) {
+        let old = config
+        config = next; configWarning = nil
+        if old.interface != next.interface || old.routerGateway != next.routerGateway {
+            sampleGeneration &+= 1
+            invalidateRouter()
+            tracker.resetBaseline()
+        }
+        if old.localPollSec != next.localPollSec || old.routerPollSec != next.routerPollSec { rebuildTimers() }
+        if old.enableQuotaAlerts != next.enableQuotaAlerts { refreshNotificationPermission() }
+        tick()
+        refreshRouter(force: true)
     }
-
-    private var onRouter: Bool { netKey == "f50" || (router.reachable && config.effectiveGateway() == SysInfo.defaultGateway()) }
-
-    // MARK: - 菜单
 
     func menuWillOpen(_ menu: NSMenu) {
         menuOpen = true
-        config = Config.load()          // 允许用户改完配置直接生效
+        let loaded = Config.read(fallback: config)
+        if loaded.config != config { applyConfig(loaded.config) }
+        configWarning = loaded.warning
         tick()
         rebuild()
         refreshRouter()
     }
-
     func menuDidClose(_ menu: NSMenu) { menuOpen = false }
-
-    private var menuOpen = false
-
-    /// 路由器数据是异步回来的：只在菜单展开时才重建，避免无谓的开销。
     private func rebuildIfOpen() { if menuOpen { rebuild() } }
 
-    private func item(_ title: String, _ action: Selector? = nil) -> NSMenuItem {
-        let it = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        it.target = action == nil ? nil : self
-        if action == nil { it.isEnabled = false }
-        return it
+    private func item(_ title: String, action: Selector? = nil) -> NSMenuItem {
+        let value = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        value.target = action == nil ? nil : self
+        value.isEnabled = action != nil
+        return value
+    }
+    private func add(_ title: String) { menu.addItem(item(title)) }
+
+    private func name(for key: String) -> String {
+        if let custom = config.networkNames[key], !custom.isEmpty { return custom }
+        if key == "f50" { return "F50 Pro（旧版累计）" }
+        if let label = tracker.state.buckets[key]?.label, !label.isEmpty { return label }
+        if let context = tracker.context, context.key == key {
+            return context.gateway.isEmpty ? "未连接 IPv4 网络（\(context.interface)）" : "\(context.interface) · \(context.gateway)"
+        }
+        return key
     }
 
     private func rebuild() {
         menu.removeAllItems()
-
-        menu.addItem(item("实时速率      ↓ \(Fmt.bytes(UInt64(max(0, rateRx))))/s    ↑ \(Fmt.bytes(UInt64(max(0, rateTx))))/s"))
+        add("实时速率      ↓ \(Fmt.bytes(UInt64(max(0, tracker.rateRx))))/s    ↑ \(Fmt.bytes(UInt64(max(0, tracker.rateTx))))/s")
+        if tracker.counters == nil { add("  本机计数读取失败，等待下一次采样") }
         menu.addItem(.separator())
-
-        // ---- 当前网络 ----
-        let b = buckets[netKey] ?? Bucket()
-        let name = !b.label.isEmpty ? b.label : (onRouter ? "5G 路由器 F50 Pro" : netKey)
-        menu.addItem(item("当前网络      \(name)"))
-        menu.addItem(item("  本网络累计  ↓ \(Fmt.bytes(b.rx))   ↑ \(Fmt.bytes(b.tx))   合计 \(Fmt.bytes(b.rx + b.tx))"))
-        menu.addItem(item("  已接入      \(Fmt.duration(since: b.firstSeen))"))
-        menu.addItem(.separator())
-
-        // ---- 5G 路由器专属 ----
-        if onRouter, router.reachable {
-            let usedGB = Double(router.monthlyTotal) / Fmt.giga
-            let pct = usedGB / max(0.01, config.quotaGB) * 100
-            menu.addItem(item("本月计费      \(Fmt.bytes(router.monthlyTotal)) / \(Fmt.trim(config.quotaGB)) GB   已用 \(String(format: "%.2f", pct))%"))
-            menu.addItem(item("  剩余        \(String(format: "%.2f", max(0, config.quotaGB - usedGB))) GB"))
-            menu.addItem(item("  下载/上传   \(Fmt.bytes(router.monthlyRx)) / \(Fmt.bytes(router.monthlyTx))"))
-            menu.addItem(item("  \(Fmt.bar(pct))"))
-            menu.addItem(.separator())
-            var sig = "5G 信号       \(router.netType.isEmpty ? "?" : router.netType)"
-            if !router.sigBar.isEmpty { sig += "   \(router.sigBar)/5" }
-            if !router.rsrp.isEmpty { sig += "   \(router.rsrp) dBm" }
-            menu.addItem(item(sig))
-            menu.addItem(item("接入设备      \(router.stations.count) 台"))
-            for s in router.stations.prefix(8) {
-                menu.addItem(item("      \(s.ip)   \(s.mac)"))
-            }
-            if !router.wanIP.isEmpty { menu.addItem(item("WAN IP        \(router.wanIP)")) }
-        } else if onRouter {
-            menu.addItem(item("本月计费      读取中…"))
-        } else {
-            menu.addItem(item("本月计费      —（当前不在 5G 路由器上）"))
-            if !router.reachable {
-                menu.addItem(item("  （\(config.effectiveGateway()) 未响应 F50 接口）"))
-            }
+        if let context = tracker.context {
+            let bucket = tracker.state.buckets[context.key] ?? Bucket()
+            add("当前网络      \(name(for: context.key))")
+            add("  本网络累计  ↓ \(Fmt.bytes(bucket.rx))   ↑ \(Fmt.bytes(bucket.tx))")
+            add("  本次连接    \(Fmt.duration(since: tracker.connectedSince))")
+            add("  开始统计    \(DateFormatter.localizedString(from: bucket.firstSeen, dateStyle: .short, timeStyle: .short))")
+            if context.gatewayMAC.isEmpty { add("  网络按网卡、网关与 DNS 区分；相同配置可能合并") }
         }
         menu.addItem(.separator())
-
-        // ---- 全部网络，明确标注避免误读 ----
-        var allRx: UInt64 = 0, allTx: UInt64 = 0
-        for (_, v) in buckets { allRx += v.rx; allTx += v.tx }
-        menu.addItem(item("全部网络合计  ↓ \(Fmt.bytes(allRx))   ↑ \(Fmt.bytes(allTx))"))
-        if buckets.count > 1 {
-            for (k, v) in buckets.sorted(by: { ($0.value.rx + $0.value.tx) > ($1.value.rx + $1.value.tx) }) where k != netKey {
-                let n = v.label.isEmpty ? k : v.label
-                menu.addItem(item("      \(n)  ↓ \(Fmt.bytes(v.rx))  ↑ \(Fmt.bytes(v.tx))"))
+        if let info = router.info, info.isF50 {
+            if let total = info.monthlyTotal {
+                if configWarning != nil {
+                    add("路由器本周期  \(Fmt.bytes(total))")
+                    add("  配置未加载，暂不估算余量")
+                } else {
+                let used = Double(total) / Fmt.giga
+                let percent = used / config.quotaGB * 100
+                add("路由器本周期  \(Fmt.bytes(total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%")
+                add("  估算剩余    \(String(format: "%.2f", max(0, config.quotaGB - used))) GB")
+                add("  下载/上传   \(Fmt.bytes(info.monthlyRx!)) / \(Fmt.bytes(info.monthlyTx!))")
+                add("  \(Fmt.bar(percent))")
+                add("  套餐余量以运营商查询结果为准")
+                }
+            } else { add("路由器用量    字段缺失或无效，暂不估算余量") }
+            if let date = router.updatedAt {
+                let age = Int(max(0, Date().timeIntervalSince(date)))
+                add("  更新于      \(DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .medium))（\(age) 秒前）")
+            }
+            var signal = "移动网络      \(info.netType.isEmpty ? "未知" : info.netType)"
+            if !info.sigBar.isEmpty { signal += " · \(info.sigBar)/5" }
+            if !info.rsrp.isEmpty { signal += " · \(info.rsrp) dBm" }
+            add(signal)
+            add("接入设备      \(info.stations.count) 台")
+            for station in info.stations.prefix(8) { add("  \(station.ip)   \(station.mac)") }
+            if !info.wanIP.isEmpty { add("WAN IP        \(info.wanIP)") }
+        } else if router.pending != nil { add("路由器用量    正在读取…") }
+        else if let error = router.errorMessage { add("路由器用量    暂不可用"); add("  \(error)") }
+        else { add("路由器用量    当前无可用的 F50 数据") }
+        menu.addItem(.separator())
+        let history = NSMenuItem(title: "近七天本机用量", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        if let key = tracker.context?.key {
+            for offset in 0..<7 {
+                let date = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
+                let day = TrafficTracker.dayKey(date)
+                let usage = tracker.state.daily[day]?[key]
+                submenu.addItem(item("\(day)    \(usage.map { Fmt.bytes($0.total) } ?? "—（未记录）")"))
             }
         }
-        menu.addItem(item("  本机开机以来 ↓ \(Fmt.bytes(lastRx))   ↑ \(Fmt.bytes(lastTx))"))
+        submenu.addItem(.separator())
+        submenu.addItem(item("仅统计本网络在 App 运行期间的用量"))
+        history.submenu = submenu
+        menu.addItem(history)
+        var all = Usage()
+        for bucket in tracker.state.buckets.values { all.rx += bucket.rx; all.tx += bucket.tx }
+        add("全部网络累计  ↓ \(Fmt.bytes(all.rx))   ↑ \(Fmt.bytes(all.tx))")
+        for (key, bucket) in tracker.state.buckets.sorted(by: { $0.value.firstSeen > $1.value.firstSeen })
+            where key != tracker.context?.key {
+            add("  \(name(for: key))  ↓ \(Fmt.bytes(bucket.rx))  ↑ \(Fmt.bytes(bucket.tx))")
+        }
+        if let counters = tracker.counters { add("当前网卡累计  ↓ \(Fmt.bytes(counters.rx))  ↑ \(Fmt.bytes(counters.tx))") }
+        for warning in [configWarning, stateWarning, saveWarning, notificationWarning].compactMap({ $0 }) {
+            add("提示：\(warning)")
+        }
         menu.addItem(.separator())
-
-        menu.addItem(item("打开配置文件", #selector(openConfig)))
-        menu.addItem(item("打开数据目录", #selector(openData)))
-        menu.addItem(item("刷新", #selector(doRefresh)))
-        menu.addItem(item("退出", #selector(quit)))
+        menu.addItem(item("设置…", action: #selector(openSettings)))
+        menu.addItem(item("打开配置文件", action: #selector(openConfig)))
+        menu.addItem(item("打开数据目录", action: #selector(openData)))
+        menu.addItem(item("刷新", action: #selector(doRefresh)))
+        menu.addItem(item("退出", action: #selector(quit)))
     }
-
-    // MARK: - 持久化
-
-    private var stateURL: URL { Config.supportDir.appendingPathComponent("state.json") }
 
     private func saveState() {
-        try? FileManager.default.createDirectory(at: Config.supportDir, withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(PersistedState(buckets: buckets)) {
-            try? data.write(to: stateURL)
+        guard instanceFD >= 0 else { return }
+        if tracker.dirty || lastSavedAt == nil {
+            do {
+                try store.save(tracker.state)
+                tracker.didSave()
+                lastSavedAt = Date()
+                saveWarning = nil
+            } catch { saveWarning = "累计保存失败：\(error.localizedDescription)" }
+        }
+        // 本地运行快照用于排查；不向外发送。
+        let status: [String: Any] = [
+            "version": "0.2.0", "pid": ProcessInfo.processInfo.processIdentifier,
+            "updatedAt": Date().timeIntervalSince1970,
+            "networkKey": tracker.context?.key ?? "", "interface": tracker.context?.interface ?? "",
+            "localPollSec": config.localPollSec, "routerPollSec": config.routerPollSec,
+            "routerModel": router.info?.model ?? "",
+            "routerUsageValid": router.info?.isF50 == true && router.info?.monthlyTotal != nil,
+            "lastSavedAt": lastSavedAt?.timeIntervalSince1970 ?? 0,
+            "warnings": [configWarning, stateWarning, saveWarning, notificationWarning].compactMap { $0 }
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: status, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: Config.supportDir.appendingPathComponent("runtime.json"), options: .atomic)
         }
     }
 
-    private func loadState() {
-        guard let data = try? Data(contentsOf: stateURL),
-              let st = try? JSONDecoder().decode(PersistedState.self, from: data)
-        else { return }
-        buckets = st.buckets
+    private func refreshNotificationPermission() {
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.notificationsAllowed = settings.authorizationStatus == .authorized
+                self.notificationWarning = self.config.enableQuotaAlerts && !self.notificationsAllowed
+                    ? "配额提醒未授权，请在设置中启用并允许通知" : nil
+            }
+        }
     }
 
-    // MARK: - 动作
+    private func checkQuotaAlert(_ info: RouterInfo, key: String) {
+        guard configWarning == nil, config.enableQuotaAlerts, notificationsAllowed, let total = info.monthlyTotal else { return }
+        let previous = tracker.state.alerts[key]
+        guard let threshold = tracker.quotaAlert(total: total, quotaGB: config.quotaGB, key: key) else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "F50 用量达到配置额度的 \(threshold)%"
+        content.body = "路由器本周期用量 \(Fmt.bytes(total))，配置额度 \(Fmt.trim(config.quotaGB)) GB。实际余量请查询运营商。"
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { [weak self] error in
+            guard let error = error else { return }
+            DispatchQueue.main.async {
+                self?.tracker.state.alerts[key] = previous
+                self?.tracker.markDirty()
+                self?.notificationWarning = "配额提醒发送失败：\(error.localizedDescription)"
+            }
+        }
+        saveState()
+    }
 
-    @objc private func openConfig() {
-        if !FileManager.default.fileExists(atPath: Config.fileURL.path) { config.save() }
-        NSWorkspace.shared.open(Config.fileURL)
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
-    @objc private func openData() {
-        NSWorkspace.shared.open(Config.supportDir)
+
+    @objc private func openSettings() {
+        settingsController = SettingsController(config: config, networkKey: tracker.context?.key) { [weak self] next in
+            guard let self = self else { return }
+            let enable = next.enableQuotaAlerts
+            self.applyConfig(next)
+            if enable {
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in
+                    self.refreshNotificationPermission()
+                }
+            }
+            self.saveState()
+        }
+        settingsController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
-    @objc private func doRefresh() { refreshRouter(); tick() }
+    @objc private func openConfig() { NSWorkspace.shared.open(Config.fileURL) }
+    @objc private func openData() { NSWorkspace.shared.open(Config.supportDir) }
+    @objc private func doRefresh() { tick(); refreshRouter(force: true); saveState() }
     @objc private func quit() { saveState(); NSApp.terminate(nil) }
 }

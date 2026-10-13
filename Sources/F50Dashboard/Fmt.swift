@@ -46,7 +46,7 @@ enum Fmt {
     // MARK: - 其它
 
     static func trim(_ v: Double) -> String {
-        v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+        String(format: v == v.rounded() ? "%.0f" : "%.1f", v)
     }
 
     static func duration(since: Date) -> String {
@@ -58,13 +58,10 @@ enum Fmt {
     /// 配额进度条（20 格）。
     static func bar(_ percent: Double) -> String {
         let cells = 20
-        let filled = min(cells, max(0, Int(percent / 100 * Double(cells))))
+        let bounded = percent.isFinite ? min(100, max(0, percent)) : 0
+        let filled = Int(bounded / 100 * Double(cells))
         return "[" + String(repeating: "█", count: filled)
                    + String(repeating: "░", count: cells - filled) + "]"
     }
 
-    /// F50 Pro 的网络特征：默认网关与首选 DNS 都指向它自己（出厂配置如此）。
-    static func isRouterSignature(gw: String, iface: String) -> Bool {
-        gw == RouterClient.defaultGateway && SysInfo.primaryDNS(iface) == RouterClient.defaultGateway
-    }
 }
