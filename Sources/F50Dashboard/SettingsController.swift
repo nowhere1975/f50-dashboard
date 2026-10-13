@@ -36,7 +36,7 @@ final class SettingsController: NSWindowController {
         rates.state = config.showRateInTitle ? .on : .off
         alerts.state = config.enableQuotaAlerts ? .on : .off
         let rows: [[NSView]] = [
-            [NSTextField(labelWithString: "套餐额度（GB）"), quota],
+            [NSTextField(labelWithString: "SIM 卡套餐额度（GB）"), quota],
             [NSTextField(labelWithString: "套餐重置日"), billingDay],
             [NSTextField(labelWithString: "运营商本周期已用（GB）"), carrierUsed],
             [NSTextField(labelWithString: "本机刷新（1–60 秒）"), localPoll],

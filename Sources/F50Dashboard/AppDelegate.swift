@@ -257,11 +257,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(.separator())
         if let info = router.info, info.isF50 {
             if let total = info.monthlyTotal {
-                add("设备当前计数  \(Fmt.bytes(total))")
+                add("路由器流量统计  \(Fmt.bytes(total))")
                 add("  下载/上传   \(Fmt.bytes(info.monthlyRx!)) / \(Fmt.bytes(info.monthlyTx!))")
-                if let day = info.autoClearDay { add("  设备设置每月 \(day) 日清零；也可能在月内清零") }
+                add("  只统计经过路由器的数据")
                 addBillingUsage()
-            } else { add("设备当前计数  字段缺失或无效，暂不估算余量") }
+            } else { add("路由器流量统计  暂未取得有效读数") }
             if let date = router.updatedAt {
                 let age = Int(max(0, Date().timeIntervalSince(date)))
                 add("  更新于      \(DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .medium))（\(age) 秒前）")
@@ -313,12 +313,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func addBillingUsage() {
         guard configWarning == nil else { add("套餐月度用量  配置未加载，暂不估算余量"); return }
         guard let day = config.billingCycleDay else {
-            add("月度套餐      \(Fmt.trim(config.quotaGB)) GB · 重置日尚未设置")
+            add("SIM 卡套餐    \(Fmt.trim(config.quotaGB)) GB（手动设置）")
             add("  请在设置中填写重置日和运营商本周期已用量")
             return
         }
         let period = BillingPeriod.containing(Date(), resetDay: day, timeZoneID: config.billingTimeZone)
-        add("套餐周期      \(period.label)")
+        add("SIM 卡月度用量（估算）")
+        add("  套餐额度    \(Fmt.trim(config.quotaGB)) GB（手动设置）")
+        add("  套餐周期    \(period.label)")
         guard let key = tracker.context?.key,
               let usage = tracker.billingUsage(key: key, config: config, date: Date()) else {
             add("  月度已记录  尚未取得有效采样")
@@ -327,7 +329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if usage.canEstimateQuota {
             let used = Double(usage.total) / Fmt.giga
             let percent = used / config.quotaGB * 100
-            add("  月度估算    \(Fmt.bytes(usage.total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%")
+            add("  已用估算    \(Fmt.bytes(usage.total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%")
             add("  估算剩余    \(String(format: "%.2f", max(0, config.quotaGB - used))) GB")
             add("  \(Fmt.bar(percent))")
             add("  套餐余量以运营商查询结果为准")
