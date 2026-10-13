@@ -114,6 +114,54 @@ expect(try JSONDecoder().decode(PersistedState.self, from: Data(contentsOf: stat
 let legacy = try JSONDecoder().decode(PersistedState.self, from: Data(#"{"buckets":{"f50":{"rx":42,"tx":8,"firstSeen":0,"label":"F50"}}}"#.utf8))
 expect(legacy.buckets["f50"]?.rx == 42 && legacy.daily.isEmpty, "legacy history preserved")
 expect((try? JSONDecoder().decode(PersistedState.self, from: Data("{}".utf8))) == nil, "incomplete state rejected")
+
+var migration = TrafficTracker()
+migration.state = legacy
+migration.state.buckets[f50.key] = Bucket(rx: 100, tx: 20, firstSeen: date, label: "F50 Pro")
+migration.state.buckets[home.key] = Bucket(rx: 7, tx: 3, firstSeen: date, label: "Home")
+migration.state.daily["2026-10-13"] = ["f50": Usage(rx: 4, tx: 2), f50.key: Usage(rx: 10, tx: 5)]
+migration.state.alerts["f50"] = AlertRecord(lastTotal: 80, notified: [80])
+let originalHome = migration.state.buckets[home.key]
+let rawArchive = try store.archiveBeforeF50Merge(migration.state)
+expect(try JSONDecoder().decode(PersistedState.self, from: Data(contentsOf: rawArchive)).buckets["f50"]?.rx == 42, "independent archive keeps original records")
+expect(try migration.mergeLegacyF50(), "known single F50 merges even while offline")
+expect(migration.state.buckets["f50"] == nil, "no separate legacy entry")
+expect(migration.state.buckets[f50.key]?.rx == 142 && migration.state.buckets[f50.key]?.tx == 28, "both counters conserved")
+expect(migration.state.buckets[f50.key]?.firstSeen == Date(timeIntervalSinceReferenceDate: 0), "earliest statistics date kept")
+expect(migration.state.buckets[f50.key]?.label == "F50 Pro", "unified device name")
+expect(migration.state.buckets[home.key] == originalHome, "other network unchanged")
+expect(migration.state.daily["2026-10-13"]?[f50.key] == Usage(rx: 14, tx: 7), "existing daily records conserved")
+expect(migration.state.daily["2026-10-13"]?["f50"] == nil, "daily records use unified identity")
+expect(migration.state.alerts[f50.key]?.notified == [80] && migration.state.alerts["f50"] == nil, "alert record transferred")
+expect(try !migration.mergeLegacyF50(), "migration is idempotent")
+try store.save(migration.state)
+var reloadedMigration = TrafficTracker()
+reloadedMigration.state = StateStore(url: stateURL).load().state
+expect(try !reloadedMigration.mergeLegacyF50() && reloadedMigration.state.buckets[f50.key]?.rx == 142, "restart never adds legacy twice")
+expect(try JSONDecoder().decode(PersistedState.self, from: Data(contentsOf: rawArchive)).buckets["f50"]?.rx == 42, "periodic saves do not replace raw archive")
+var unidentified = TrafficTracker()
+unidentified.state = legacy
+unidentified.state.buckets[home.key] = Bucket(label: "Home")
+expect(try !unidentified.mergeLegacyF50() && unidentified.state.buckets["f50"]?.rx == 42, "ordinary current network cannot receive F50 history")
+unidentified.state.buckets[f50.key] = Bucket(label: "F50 Pro")
+unidentified.state.buckets[home.key]!.label = "F50 Pro"
+expect(try !unidentified.mergeLegacyF50(), "multiple F50 devices are not mixed")
+var noDailyHistory = TrafficTracker()
+noDailyHistory.state = legacy
+noDailyHistory.state.buckets[f50.key] = Bucket(label: "F50 Pro")
+expect(try noDailyHistory.mergeLegacyF50() && noDailyHistory.state.daily.isEmpty, "undated usage not invented as daily history")
+var overflowMigration = TrafficTracker()
+overflowMigration.state = legacy
+overflowMigration.state.buckets[f50.key] = Bucket(label: "F50 Pro")
+overflowMigration.state.daily["day"] = ["f50": Usage(rx: UInt64.max), f50.key: Usage(rx: 1)]
+do {
+    _ = try overflowMigration.mergeLegacyF50()
+    expect(false, "overflow must reject migration")
+} catch {
+    expect(overflowMigration.state.buckets["f50"]?.rx == 42 && overflowMigration.state.buckets[f50.key]?.rx == 0,
+           "failed migration changes neither record")
+}
+
 var alert = TrafficTracker()
 expect(alert.quotaAlert(total: 80_000_000_000, quotaGB: 100, key: "f50") == 80, "80 percent alert")
 expect(alert.quotaAlert(total: 81_000_000_000, quotaGB: 100, key: "f50") == nil, "alert not repeated")

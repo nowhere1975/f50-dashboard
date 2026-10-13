@@ -42,10 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         config = loaded.config; configWarning = loaded.warning
         let state = store.load()
         tracker.state = state.state; stateWarning = state.warning
+        mergeLegacyF50IfPossible()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         statusItem.button?.title = "↓  --- ↑  ---"
-        statusItem.button?.toolTip = "F50 Dashboard 0.2.0"
+        statusItem.button?.toolTip = "F50 Dashboard 0.2.1"
         menu.delegate = self
         statusItem.menu = menu
         networkObserver.onChange = { [weak self] in self?.networkChanged() }
@@ -166,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 self.routerTask = nil
                 if info.isF50 {
                     self.tracker.setLabel("F50 Pro", for: request.network.key)
+                    self.mergeLegacyF50IfPossible()
                     self.checkQuotaAlert(info, key: request.network.key)
                 }
                 self.rebuildIfOpen()
@@ -209,12 +211,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func name(for key: String) -> String {
         if let custom = config.networkNames[key], !custom.isEmpty { return custom }
-        if key == "f50" { return "F50 Pro（旧版累计）" }
+        if key == "f50" { return "F50 Pro" }
         if let label = tracker.state.buckets[key]?.label, !label.isEmpty { return label }
         if let context = tracker.context, context.key == key {
             return context.gateway.isEmpty ? "未连接 IPv4 网络（\(context.interface)）" : "\(context.interface) · \(context.gateway)"
         }
         return key
+    }
+
+    private func mergeLegacyF50IfPossible() {
+        guard let key = tracker.legacyF50Destination() else { return }
+        do {
+            _ = try store.archiveBeforeF50Merge(tracker.state)
+            guard try tracker.mergeLegacyF50() else { return }
+            // 保留用户给旧记录设置的名称；已设置的目标名称优先。
+            if config.networkNames[key] == nil, let alias = config.networkNames["f50"] {
+                config.networkNames[key] = alias
+                do { try config.save() }
+                catch { configWarning = "网络名称保存失败：\(error.localizedDescription)" }
+            }
+            saveState()
+        } catch { stateWarning = "累计合并未完成：\(error.localizedDescription)" }
     }
 
     private func rebuild() {
@@ -306,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         // 本地运行快照用于排查；不向外发送。
         let status: [String: Any] = [
-            "version": "0.2.0", "pid": ProcessInfo.processInfo.processIdentifier,
+            "version": "0.2.1", "pid": ProcessInfo.processInfo.processIdentifier,
             "updatedAt": Date().timeIntervalSince1970,
             "networkKey": tracker.context?.key ?? "", "interface": tracker.context?.interface ?? "",
             "localPollSec": config.localPollSec, "routerPollSec": config.routerPollSec,

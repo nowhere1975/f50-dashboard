@@ -39,4 +39,14 @@ final class StateStore {
         try data.write(to: url, options: .atomic)
         lastValidData = data
     }
+
+    /// 迁移前独立留存，避免定时备份轮换后丢失合并前的结构。
+    func archiveBeforeF50Merge(_ state: PersistedState) throws -> URL {
+        let archive = url.deletingLastPathComponent()
+            .appendingPathComponent("state.before-f50-merge.\(UUID().uuidString).json")
+        let data = try JSONEncoder().encode(state)
+        try FileManager.default.createDirectory(at: archive.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: archive, options: .atomic)
+        return archive
+    }
 }

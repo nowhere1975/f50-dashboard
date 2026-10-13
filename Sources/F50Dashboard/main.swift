@@ -1,6 +1,6 @@
 import Cocoa
 
-let appVersion = "0.2.0"
+let appVersion = "0.2.1"
 
 func printCheck() -> Bool {
     let loaded = Config.read()

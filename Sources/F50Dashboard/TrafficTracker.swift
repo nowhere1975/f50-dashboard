@@ -6,7 +6,7 @@ struct Usage: Codable, Equatable {
     var total: UInt64 { rx + tx }
 }
 
-struct Bucket: Codable {
+struct Bucket: Codable, Equatable {
     var rx: UInt64 = 0
     var tx: UInt64 = 0
     var firstSeen: Date = Date()
@@ -124,6 +124,51 @@ struct TrafficTracker {
         guard state.buckets[key]?.label != label else { return }
         state.buckets[key, default: Bucket()].label = label
         dirty = true
+    }
+
+    /// 升级前后属于同一台设备的累计接续记录；多台已确认 F50 时不猜归属。
+    func legacyF50Destination() -> String? {
+        guard state.buckets["f50"] != nil else { return nil }
+        let candidates = state.buckets.filter { key, bucket in
+            key.hasPrefix("mac:") && bucket.label == "F50 Pro"
+                && !SysInfo.normalizeMAC(String(key.dropFirst(4))).isEmpty
+        }.map(\.key)
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
+    @discardableResult
+    mutating func mergeLegacyF50() throws -> Bool {
+        guard let key = legacyF50Destination(), let legacy = state.buckets["f50"],
+              var current = state.buckets[key] else { return false }
+        func add(_ a: UInt64, _ b: UInt64) throws -> UInt64 {
+            let result = a.addingReportingOverflow(b)
+            guard !result.overflow else { throw ConfigError(message: "累计合并超出计数范围，原记录已保留") }
+            return result.partialValue
+        }
+        var next = state
+        current.rx = try add(current.rx, legacy.rx)
+        current.tx = try add(current.tx, legacy.tx)
+        current.firstSeen = min(current.firstSeen, legacy.firstSeen)
+        next.buckets[key] = current
+        next.buckets.removeValue(forKey: "f50")
+        // 只转移已有的日记录，不把没有日期明细的累计补到某一天。
+        for day in Array(next.daily.keys) {
+            if let usage = next.daily[day]?.removeValue(forKey: "f50") {
+                var merged = next.daily[day]?[key] ?? Usage()
+                merged.rx = try add(merged.rx, usage.rx)
+                merged.tx = try add(merged.tx, usage.tx)
+                guard !merged.rx.addingReportingOverflow(merged.tx).overflow else {
+                    throw ConfigError(message: "每日累计合并超出计数范围，原记录已保留")
+                }
+                next.daily[day]![key] = merged
+            }
+        }
+        if let legacyAlert = next.alerts.removeValue(forKey: "f50"), next.alerts[key] == nil {
+            next.alerts[key] = legacyAlert
+        }
+        state = next
+        dirty = true
+        return true
     }
     mutating func didSave() { dirty = false }
     mutating func markDirty() { dirty = true }
