@@ -15,8 +15,13 @@ struct RouterInfo {
     var stations: [(mac: String, ip: String)] = []
     var errorMessage: String?
     var autoClearDay: Int?
+    var hasStationList = false
 
     var isF50: Bool { model.lowercased().hasPrefix("f50") }
+    var isF50Pro: Bool { Self.isF50ProModel(model) }
+    static func isF50ProModel(_ model: String) -> Bool {
+        model.lowercased().filter { $0.isLetter || $0.isNumber }.hasPrefix("f50pro")
+    }
     // 固件将该计数命名为 monthly；它可在套餐周期内清零，不代表完整月度账单。
     var monthlyTotal: UInt64? {
         guard let rx = monthlyRx, let tx = monthlyTx else { return nil }
@@ -111,6 +116,7 @@ enum RouterClient {
         if ["on", "1"].contains(str("flux_auto_clear_flow_data_switch").lowercased()),
            let day = Int(str("flux_clear_date")), (1...31).contains(day) { info.autoClearDay = day }
         if let list = object["station_list"] as? [[String: Any]] {
+            info.hasStationList = true
             info.stations = list.map { (mac: $0["mac_addr"] as? String ?? "?",
                                        ip: $0["ip_addr"] as? String ?? "?") }
         }

@@ -23,15 +23,22 @@ struct PersistedState: Codable {
     var daily: [String: [String: Usage]] = [:]
     var alerts: [String: AlertRecord] = [:]
     var billing: [String: [String: BillingUsage]] = [:]
+    var devices: [String: ConfirmedDevice] = [:]
 
     init() {}
-    private enum CodingKeys: String, CodingKey { case buckets, daily, alerts, billing }
+    private enum CodingKeys: String, CodingKey { case buckets, daily, alerts, billing, devices }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         buckets = try c.decode([String: Bucket].self, forKey: .buckets)
         daily = try c.decodeIfPresent([String: [String: Usage]].self, forKey: .daily) ?? [:]
         alerts = try c.decodeIfPresent([String: AlertRecord].self, forKey: .alerts) ?? [:]
         billing = try c.decodeIfPresent([String: [String: BillingUsage]].self, forKey: .billing) ?? [:]
+        devices = try c.decodeIfPresent([String: ConfirmedDevice].self, forKey: .devices) ?? [:]
+        for (key, device) in devices {
+            guard key.hasPrefix("mac:"), !SysInfo.normalizeMAC(String(key.dropFirst(4))).isEmpty,
+                  key == "mac:\(device.gatewayMAC)", SysInfo.normalizeMAC(device.gatewayMAC) == device.gatewayMAC,
+                  RouterInfo.isF50ProModel(device.model) else { throw ConfigError(message: "设备识别记录无效") }
+        }
         for records in billing.values {
             for (key, record) in records {
                 guard TimeZone(identifier: record.period.timeZoneID) != nil,
@@ -142,6 +149,15 @@ struct TrafficTracker {
         guard state.buckets[key]?.label != label else { return }
         state.buckets[key, default: Bucket()].label = label
         dirty = true
+    }
+
+    mutating func rememberDevice(_ info: RouterInfo, key: String, date: Date) {
+        guard key.hasPrefix("mac:"), !SysInfo.normalizeMAC(String(key.dropFirst(4))).isEmpty,
+              info.responded, !info.model.isEmpty else { return }
+        if info.isF50Pro {
+            state.devices[key] = ConfirmedDevice(gatewayMAC: String(key.dropFirst(4)), model: info.model, verifiedAt: date)
+            dirty = true
+        } else if state.devices.removeValue(forKey: key) != nil { dirty = true }
     }
 
     /// 升级前后属于同一台设备的累计接续记录；多台已确认 F50 时不猜归属。

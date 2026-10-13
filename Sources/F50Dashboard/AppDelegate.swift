@@ -166,7 +166,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 guard actual == self.tracker.context else { self.networkChanged(); return }
                 guard self.router.accept(info, request: request, current: self.tracker.context, date: Date()) else { return }
                 self.routerTask = nil
-                if info.isF50 {
+                if request.targetsCurrentGateway {
+                    self.tracker.rememberDevice(info, key: request.network.key, date: Date())
+                }
+                if info.isF50Pro && request.targetsCurrentGateway {
                     self.tracker.setLabel("F50 Pro", for: request.network.key)
                     self.mergeLegacyF50IfPossible()
                     if self.configWarning == nil {
@@ -214,18 +217,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         value.isEnabled = action != nil
         return value
     }
-    private func add(_ title: String) { menu.addItem(item(title)) }
-
-    private func name(for key: String) -> String {
-        if let custom = config.networkNames[key], !custom.isEmpty { return custom }
-        if key == "f50" { return "F50 Pro" }
-        if let label = tracker.state.buckets[key]?.label, !label.isEmpty { return label }
-        if let context = tracker.context, context.key == key {
-            return context.gateway.isEmpty ? "未连接 IPv4 网络（\(context.interface)）" : "\(context.interface) · \(context.gateway)"
-        }
-        return key
-    }
-
     private func mergeLegacyF50IfPossible() {
         guard let key = tracker.legacyF50Destination() else { return }
         do {
@@ -241,104 +232,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         } catch { stateWarning = "累计合并未完成：\(error.localizedDescription)" }
     }
 
-    private func rebuild() {
-        menu.removeAllItems()
-        add("实时速率      ↓ \(Fmt.bytes(UInt64(max(0, tracker.rateRx))))/s    ↑ \(Fmt.bytes(UInt64(max(0, tracker.rateTx))))/s")
-        if tracker.counters == nil { add("  本机计数读取失败，等待下一次采样") }
-        menu.addItem(.separator())
-        if let context = tracker.context {
-            let bucket = tracker.state.buckets[context.key] ?? Bucket()
-            add("当前网络      \(name(for: context.key))")
-            add("  本网络累计  ↓ \(Fmt.bytes(bucket.rx))   ↑ \(Fmt.bytes(bucket.tx))")
-            add("  本次连接    \(Fmt.duration(since: tracker.connectedSince))")
-            add("  开始统计    \(DateFormatter.localizedString(from: bucket.firstSeen, dateStyle: .short, timeStyle: .short))")
-            if context.gatewayMAC.isEmpty { add("  网络按网卡、网关与 DNS 区分；相同配置可能合并") }
-        }
-        menu.addItem(.separator())
-        if let info = router.info, info.isF50 {
-            if let total = info.monthlyTotal {
-                add("路由器流量统计  \(Fmt.bytes(total))")
-                add("  下载/上传   \(Fmt.bytes(info.monthlyRx!)) / \(Fmt.bytes(info.monthlyTx!))")
-                add("  只统计经过路由器的数据")
-                addBillingUsage()
-            } else { add("路由器流量统计  暂未取得有效读数") }
-            if let date = router.updatedAt {
-                let age = Int(max(0, Date().timeIntervalSince(date)))
-                add("  更新于      \(DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .medium))（\(age) 秒前）")
-            }
-            var signal = "移动网络      \(info.netType.isEmpty ? "未知" : info.netType)"
-            if !info.sigBar.isEmpty { signal += " · \(info.sigBar)/5" }
-            if !info.rsrp.isEmpty { signal += " · \(info.rsrp) dBm" }
-            add(signal)
-            add("接入设备      \(info.stations.count) 台")
-            for station in info.stations.prefix(8) { add("  \(station.ip)   \(station.mac)") }
-            if !info.wanIP.isEmpty { add("WAN IP        \(info.wanIP)") }
-        } else if router.pending != nil { add("路由器用量    正在读取…") }
-        else if let error = router.errorMessage { add("路由器用量    暂不可用"); add("  \(error)") }
-        else { add("路由器用量    当前无可用的 F50 数据") }
-        menu.addItem(.separator())
-        let history = NSMenuItem(title: "近七天本机用量", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        if let key = tracker.context?.key {
-            for offset in 0..<7 {
-                let date = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
-                let day = TrafficTracker.dayKey(date)
-                let usage = tracker.state.daily[day]?[key]
-                submenu.addItem(item("\(day)    \(usage.map { Fmt.bytes($0.total) } ?? "—（未记录）")"))
-            }
-        }
-        submenu.addItem(.separator())
-        submenu.addItem(item("仅统计本网络在 App 运行期间的用量"))
-        history.submenu = submenu
-        menu.addItem(history)
-        var all = Usage()
-        for bucket in tracker.state.buckets.values { all.rx += bucket.rx; all.tx += bucket.tx }
-        add("全部网络累计  ↓ \(Fmt.bytes(all.rx))   ↑ \(Fmt.bytes(all.tx))")
-        for (key, bucket) in tracker.state.buckets.sorted(by: { $0.value.firstSeen > $1.value.firstSeen })
-            where key != tracker.context?.key {
-            add("  \(name(for: key))  ↓ \(Fmt.bytes(bucket.rx))  ↑ \(Fmt.bytes(bucket.tx))")
-        }
-        if let counters = tracker.counters { add("当前网卡累计  ↓ \(Fmt.bytes(counters.rx))  ↑ \(Fmt.bytes(counters.tx))") }
-        for warning in [configWarning, stateWarning, saveWarning, notificationWarning, billingWarning].compactMap({ $0 }) {
-            add("提示：\(warning)")
-        }
-        menu.addItem(.separator())
-        menu.addItem(item("设置…", action: #selector(openSettings)))
-        menu.addItem(item("打开配置文件", action: #selector(openConfig)))
-        menu.addItem(item("打开数据目录", action: #selector(openData)))
-        menu.addItem(item("刷新", action: #selector(doRefresh)))
-        menu.addItem(item("退出", action: #selector(quit)))
+    private func menuEntries() -> [MenuEntry] {
+        DashboardMenu.entries(tracker: tracker, router: router, config: config,
+            configWarning: configWarning,
+            warnings: [configWarning, stateWarning, saveWarning].compactMap { $0 },
+            deviceWarnings: [notificationWarning, billingWarning].compactMap { $0 })
     }
 
-    private func addBillingUsage() {
-        guard configWarning == nil else { add("套餐月度用量  配置未加载，暂不估算余量"); return }
-        guard let day = config.billingCycleDay else {
-            add("SIM 卡套餐    \(Fmt.trim(config.quotaGB)) GB（手动设置）")
-            add("  请在设置中填写重置日和运营商本周期已用量")
-            return
+    private func menuItem(_ entry: MenuEntry) -> NSMenuItem {
+        if entry.isSeparator { return .separator() }
+        let selector = entry.action.map { action -> Selector in
+            switch action {
+            case .settings: return #selector(openSettings)
+            case .config: return #selector(openConfig)
+            case .data: return #selector(openData)
+            case .refresh: return #selector(doRefresh)
+            case .quit: return #selector(quit)
+            }
         }
-        let period = BillingPeriod.containing(Date(), resetDay: day, timeZoneID: config.billingTimeZone)
-        add("SIM 卡月度用量（估算）")
-        add("  套餐额度    \(Fmt.trim(config.quotaGB)) GB（手动设置）")
-        add("  套餐周期    \(period.label)")
-        guard let key = tracker.context?.key,
-              let usage = tracker.billingUsage(key: key, config: config, date: Date()) else {
-            add("  月度已记录  尚未取得有效采样")
-            return
+        let value = item(entry.title, action: selector)
+        if let children = entry.children {
+            let submenu = NSMenu()
+            for child in children { submenu.addItem(menuItem(child)) }
+            value.submenu = submenu
+            value.isEnabled = true
         }
-        if usage.canEstimateQuota {
-            let used = Double(usage.total) / Fmt.giga
-            let percent = used / config.quotaGB * 100
-            add("  已用估算    \(Fmt.bytes(usage.total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%")
-            add("  估算剩余    \(String(format: "%.2f", max(0, config.quotaGB - used))) GB")
-            add("  \(Fmt.bar(percent))")
-            add("  套餐余量以运营商查询结果为准")
-        } else {
-            add("  月度已记录  \(Fmt.bytes(usage.total)) · \(Fmt.trim(config.quotaGB)) GB 套餐")
-            add(usage.calibratedAt == nil ? "  周期初始用量未知，请用运营商已用量校准"
-                : "  断采或设备清零可能漏记，请用运营商已用量校准")
-        }
-        if config.enableQuotaAlerts && !usage.canEstimateQuota { add("  月度配额提醒等待用量校准") }
+        return value
+    }
+
+    private func rebuild() {
+        menu.removeAllItems()
+        for entry in menuEntries() { menu.addItem(menuItem(entry)) }
     }
 
     private func saveState() {
@@ -358,11 +282,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             "networkKey": tracker.context?.key ?? "", "interface": tracker.context?.interface ?? "",
             "localPollSec": config.localPollSec, "routerPollSec": config.routerPollSec,
             "routerModel": router.info?.model ?? "",
-            "routerUsageValid": router.info?.isF50 == true && router.info?.monthlyTotal != nil,
+            "routerUsageValid": router.info?.isF50Pro == true && router.info?.monthlyTotal != nil,
             "lastSavedAt": lastSavedAt?.timeIntervalSince1970 ?? 0,
             "billingCycleDay": config.billingCycleDay ?? 0, "billingTimeZone": config.billingTimeZone,
             "warnings": [configWarning, stateWarning, saveWarning, notificationWarning, billingWarning].compactMap { $0 }
         ]
+        let module = router.moduleState(current: tracker.context,
+            knownDevice: tracker.context.flatMap { tracker.state.devices[$0.key] })
+        status["f50ModuleState"] = module.rawValue
+        status["f50ModuleVisible"] = module != .hidden
+        status["menuTitles"] = menuEntries().filter { !$0.isSeparator }.map(\.title)
         if let total = router.info?.monthlyTotal { status["routerCounterBytes"] = total }
         if let key = tracker.context?.key, let usage = tracker.billingUsage(key: key, config: config, date: Date()) {
             status["billingPeriod"] = usage.period.label
@@ -426,7 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                       context.key == settingsNetwork,
                       SysInfo.networkContext(interface: self.config.interface) == context,
                       self.config.interface == next.interface, self.config.routerGateway == next.routerGateway,
-                      let info = self.router.info, info.isF50, let sampledAt = self.router.updatedAt,
+                      let info = self.router.info, info.isF50Pro, let sampledAt = self.router.updatedAt,
                       now.timeIntervalSince(sampledAt) >= 0,
                       now.timeIntervalSince(sampledAt) <= min(60, max(10, self.config.routerPollSec * 2)) else {
                     throw ConfigError(message: "请连接 F50 并刷新设备读数，再填写运营商当前已用量；网卡或管理地址请另行保存")

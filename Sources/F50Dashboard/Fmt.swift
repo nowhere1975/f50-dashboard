@@ -48,8 +48,8 @@ enum Fmt {
         String(format: v == v.rounded() ? "%.0f" : "%.1f", v)
     }
 
-    static func duration(since: Date) -> String {
-        let mins = max(0, Int(Date().timeIntervalSince(since) / 60))
+    static func duration(since: Date, now: Date = Date()) -> String {
+        let mins = max(0, Int(now.timeIntervalSince(since) / 60))
         let h = mins / 60, m = mins % 60
         return h > 0 ? "\(h) 小时 \(m) 分钟" : "\(m) 分钟"
     }

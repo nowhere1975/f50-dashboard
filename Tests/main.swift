@@ -277,4 +277,110 @@ corruptRecord["period"] = corruptPeriod; corruptDevice[actualUsage.period.key] =
 corruptRecords[f50.key] = corruptDevice; corruptBilling["billing"] = corruptRecords
 expect((try? JSONDecoder().decode(PersistedState.self, from: JSONSerialization.data(withJSONObject: corruptBilling))) == nil,
        "corrupt billing timezone rejected before period rendering")
+expect(valid.isF50Pro && RouterInfo.isF50ProModel("F50 Pro V1"), "F50 Pro model variants recognized")
+expect(!RouterInfo.isF50ProModel("F50V1") && !RouterInfo.isF50ProModel("MF79"), "other router models cannot open Pro module")
+expect(parse(#"{"wa_inner_version":"F50ProV1","station_list":[]}"#).hasStationList,
+       "explicit empty client list is valid")
+expect(!valid.hasStationList, "missing client list is unknown rather than zero")
+
+var uiTracker = actualTracker
+uiTracker.sample(context: f50, counters: InterfaceCounters(rx: 1000, tx: 100), uptime: 0, date: october, maxGap: 30)
+uiTracker.setLabel("F50 Pro", for: f50.key)
+uiTracker.state.buckets[home.key] = Bucket(rx: 10_000, tx: 1000, firstSeen: october, label: "Home")
+var uiInfo = reading(28_000_000, 27_000_000)
+uiInfo.netType = "LTE"; uiInfo.sigBar = "5"; uiInfo.rsrp = "-92"; uiInfo.wanIP = "10.2.3.4"
+uiInfo.hasStationList = true; uiInfo.stations = [(mac: "aa:bb:cc:dd:ee:ff", ip: "192.168.0.101")]
+uiTracker.rememberDevice(uiInfo, key: f50.key, date: october)
+let knownPro = uiTracker.state.devices[f50.key]!
+var uiRouter = RouterState()
+expect(uiRouter.moduleState(current: home, knownDevice: nil) == .hidden, "ordinary network starts without device module")
+let initialProbe = uiRouter.begin(network: home, gateway: home.gateway)
+expect(uiRouter.moduleState(current: home, knownDevice: nil) == .hidden, "unknown-router probing stays invisible")
+let homeInfo = parse(#"{"wa_inner_version":"MF79","monthly_rx_bytes":1,"monthly_tx_bytes":1}"#)
+_ = uiRouter.accept(homeInfo, request: initialProbe, current: home, date: october)
+expect(uiRouter.moduleState(current: home, knownDevice: knownPro) == .hidden, "actual non-Pro model overrides mismatched stored device")
+uiRouter.invalidate()
+let f50Probe = uiRouter.begin(network: f50, gateway: f50.gateway)
+_ = uiRouter.accept(uiInfo, request: f50Probe, current: f50, date: october)
+expect(uiRouter.moduleState(current: f50, knownDevice: knownPro) == .ready, "verified current F50 Pro opens module")
+func allEntries(_ entries: [MenuEntry]) -> [MenuEntry] { entries.flatMap { [$0] + allEntries($0.children ?? []) } }
+let connectedEntries = DashboardMenu.entries(tracker: uiTracker, router: uiRouter, config: actualPlan, date: october)
+let connectedTitles = connectedEntries.map(\.title)
+expect(connectedTitles.contains("F50 Pro") && connectedTitles.contains("历史用量"), "connected layout has Pro and history sections")
+expect(connectedTitles.first?.hasPrefix("实时速率") == true && connectedTitles.contains { $0.hasPrefix("当前网络") }, "rate and network stay on main menu")
+expect(connectedTitles.contains { $0.contains("13.04%") } && connectedTitles.contains { $0.contains("173.93") }, "monthly calibrated estimate remains on main menu")
+expect(!connectedTitles.contains { $0.contains("WAN IP") || $0.contains("aa:bb") || $0.contains("设备原始统计") }, "raw counters and client addresses do not clutter main menu")
+let details = connectedEntries.first { $0.title == "详细信息" }!.children!
+expect(details.contains { $0.title.contains("设备原始统计") } && details.contains { $0.title.contains("10.2.3.4") }
+       && details.contains { $0.title.contains("aa:bb:cc:dd:ee:ff") }, "hardware diagnostics remain available in submenu")
+let historyRows = connectedEntries.first { $0.title == "历史用量" }!.children!
+expect(historyRows.contains { $0.title == "近七天（当前网络）" } && historyRows.contains { $0.title == "各网络累计" }, "history contains both daily and network totals")
+expect(!connectedTitles.contains { $0.hasPrefix("全部网络累计") || $0.hasPrefix("系统网卡累计") }, "history totals moved out of main menu")
+expect(connectedEntries.suffix(5).compactMap(\.action).count == 5, "all five menu controls retained")
+
+var failure = RouterInfo(); failure.errorMessage = "测试读取超时"
+let failedProbe = uiRouter.begin(network: f50, gateway: f50.gateway)
+_ = uiRouter.accept(failure, request: failedProbe, current: f50, date: october.addingTimeInterval(30))
+expect(uiRouter.info == nil && uiRouter.moduleState(current: f50, knownDevice: knownPro) == .unavailable,
+       "temporary failure keeps identity but clears data")
+let failedTitles = DashboardMenu.entries(tracker: uiTracker, router: uiRouter, config: actualPlan, date: october).map(\.title)
+expect(failedTitles.contains("F50 Pro") && failedTitles.contains { $0.contains("设备数据暂不可用") }, "failed-read Pro card stays visible")
+expect(!failedTitles.contains { $0.contains("13.04%") || $0.contains("估算剩余") }, "failed read cannot show stale quota numbers")
+let retryProbe = uiRouter.begin(network: f50, gateway: f50.gateway)
+expect(uiRouter.moduleState(current: f50, knownDevice: knownPro) == .loading, "known Pro retry remains visible as loading")
+_ = uiRouter.accept(uiInfo, request: retryProbe, current: f50, date: october.addingTimeInterval(60))
+expect(uiRouter.moduleState(current: f50, knownDevice: knownPro) == .ready, "successful retry restores Pro data")
+
+let staleProbe = uiRouter.begin(network: f50, gateway: f50.gateway)
+uiRouter.invalidate()
+uiTracker.sample(context: home, counters: InterfaceCounters(rx: 5000, tx: 500), uptime: 2,
+                 date: october.addingTimeInterval(2), maxGap: 30)
+_ = uiRouter.begin(network: home, gateway: home.gateway)
+expect(uiRouter.moduleState(current: home, knownDevice: knownPro) == .hidden, "same gateway IP with different MAC cannot reuse Pro identity")
+expect(!uiRouter.accept(uiInfo, request: staleProbe, current: home, date: october), "late Pro response cannot reopen card after switching")
+var aliasConfig = actualPlan; aliasConfig.networkNames[home.key] = "F50 Pro"
+let homeEntries = DashboardMenu.entries(tracker: uiTracker, router: uiRouter, config: aliasConfig, date: october,
+                                       deviceWarnings: ["测试配额提醒错误"])
+expect(!homeEntries.map(\.title).contains("F50 Pro") && !homeEntries.map(\.title).contains("详细信息"), "network alias cannot identify hardware or reveal Pro details")
+expect(!homeEntries.map(\.title).contains { $0.contains("路由器用量") || $0.contains("测试配额提醒") || $0.contains("SIM 卡") }, "ordinary network has no Pro placeholders or quota warnings")
+expect(allEntries(homeEntries).contains { $0.title.contains("F50 Pro") } && homeEntries.map(\.title).contains("历史用量"), "Pro history is retained while Pro module is hidden")
+expect(!homeEntries.first!.isSeparator && !homeEntries.last!.isSeparator
+       && !zip(homeEntries, homeEntries.dropFirst()).contains { $0.isSeparator && $1.isSeparator }, "hidden card leaves no empty separator block")
+
+try billingStore.save(uiTracker.state)
+let savedDevice = billingStore.load().state.devices[f50.key]
+expect(savedDevice?.model == uiInfo.model && savedDevice?.gatewayMAC == f50.gatewayMAC, "model and hardware identity survive restart")
+var restartRouter = RouterState()
+_ = restartRouter.begin(network: f50, gateway: f50.gateway)
+expect(restartRouter.moduleState(current: f50, knownDevice: savedDevice) == .loading, "known Pro can keep card during first read after restart")
+let usbPro = NetworkContext(interface: "en15", gateway: f50.gateway, dns: f50.dns, gatewayMAC: f50.gatewayMAC)
+expect(restartRouter.moduleState(current: usbPro, knownDevice: savedDevice) == .unavailable, "same Pro MAC across interfaces retains device identity")
+let noMAC = NetworkContext(interface: "en0", gateway: f50.gateway, dns: f50.dns, gatewayMAC: "")
+expect(restartRouter.moduleState(current: noMAC, knownDevice: savedDevice) == .hidden, "missing MAC cannot reuse stored identity across networks")
+let noMACProbe = restartRouter.begin(network: noMAC, gateway: noMAC.gateway)
+_ = restartRouter.accept(uiInfo, request: noMACProbe, current: noMAC, date: october)
+expect(restartRouter.moduleState(current: noMAC, knownDevice: nil) == .ready, "live model proof works even before MAC is available")
+let offline = NetworkContext(interface: "", gateway: "", dns: "", gatewayMAC: f50.gatewayMAC)
+expect(restartRouter.moduleState(current: offline, knownDevice: savedDevice) == .hidden, "no active gateway means no Pro module")
+
+var wrongTarget = RouterState()
+let wrongProbe = wrongTarget.begin(network: home, gateway: "192.168.1.1")
+expect(!wrongProbe.targetsCurrentGateway, "custom management address is not assumed to be current gateway")
+_ = wrongTarget.accept(uiInfo, request: wrongProbe, current: home, date: october)
+expect(wrongTarget.info == nil && wrongTarget.moduleState(current: home, knownDevice: nil) == .hidden, "reachable Pro elsewhere cannot label current home router")
+expect(RouterRequest(serial: 1, network: f50, gateway: f50.gateway + ":8080").targetsCurrentGateway, "current gateway IP with custom port remains valid")
+
+var missingCounts = uiInfo; missingCounts.monthlyRx = nil; missingCounts.hasStationList = false
+uiTracker.sample(context: f50, counters: InterfaceCounters(rx: 6000, tx: 600), uptime: 4, date: october, maxGap: 30)
+var partialRouter = RouterState()
+let partialProbe = partialRouter.begin(network: f50, gateway: f50.gateway)
+_ = partialRouter.accept(missingCounts, request: partialProbe, current: f50, date: october)
+let partialTitles = DashboardMenu.entries(tracker: uiTracker, router: partialRouter, config: actualPlan, date: october).map(\.title)
+expect(partialTitles.contains("F50 Pro") && !partialTitles.contains { $0.contains("13.04%") || $0.contains("估算剩余") }, "confirmed device with missing counts cannot reuse old monthly estimate")
+expect(partialTitles.contains { $0.hasPrefix("接入设备") && $0.contains("暂未取得") }, "missing clients never displayed as zero")
+let changedModelProbe = partialRouter.begin(network: f50, gateway: f50.gateway)
+_ = partialRouter.accept(homeInfo, request: changedModelProbe, current: f50, date: october)
+uiTracker.rememberDevice(homeInfo, key: f50.key, date: october)
+expect(uiTracker.state.devices[f50.key] == nil && partialRouter.moduleState(current: f50, knownDevice: savedDevice) == .hidden,
+       "definitive different model revokes old Pro proof")
 print("PASS: \(checks) Swift regression checks")
