@@ -5,6 +5,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private let menuRenderer = MenuRenderer()
+    private lazy var dashboard = DashboardPopover(version: appVersion) { [weak self] action in
+        self?.handleDashboardAction(action)
+    }
     private var localTimer: Timer?
     private var routerTimer: Timer?
     private var saveTimer: Timer?
@@ -50,7 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         statusItem.button?.title = "↓  --- ↑  ---"
         statusItem.button?.toolTip = "F50 Dashboard \(appVersion)"
         menu.delegate = self
-        statusItem.menu = menu
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(toggleDashboard(_:))
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         networkObserver.onChange = { [weak self] in self?.networkChanged() }
         networkObserver.start()
         let center = NSWorkspace.shared.notificationCenter
@@ -215,7 +220,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     func menuDidClose(_ menu: NSMenu) {
         if menu === self.menu { menuOpen = false }
     }
-    private func rebuildIfOpen() { if menuOpen { rebuild() } }
+    private func rebuildIfOpen() {
+        if menuOpen { rebuild() }
+        if dashboard.isShown { dashboard.update(dashboardSnapshot()) }
+    }
+
+    private func dashboardSnapshot() -> DashboardSnapshot {
+        DashboardSnapshot.make(tracker: tracker, router: router, config: config,
+            configWarning: configWarning,
+            warnings: [configWarning, stateWarning, saveWarning].compactMap { $0 },
+            deviceWarnings: [notificationWarning, billingWarning].compactMap { $0 })
+    }
+
+    @objc private func toggleDashboard(_ sender: NSStatusBarButton) {
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
+            dashboard.close()
+            NSMenu.popUpContextMenu(menu, with: event, for: sender)
+            return
+        }
+        if !dashboard.isShown {
+            let loaded = Config.read(fallback: config)
+            if loaded.config != config { applyConfig(loaded.config) }
+            configWarning = loaded.warning
+            tick()
+            dashboard.update(dashboardSnapshot())
+            refreshRouter()
+        }
+        dashboard.toggle(from: sender)
+    }
+
+    private func handleDashboardAction(_ action: MenuEntry.Action) {
+        if action != .refresh { dashboard.close() }
+        switch action {
+        case .settings: openSettings()
+        case .config: openConfig()
+        case .data: openData()
+        case .refresh: doRefresh()
+        case .quit: quit()
+        }
+    }
 
     private func item(_ title: String, action: Selector? = nil) -> NSMenuItem {
         let value = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -284,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         // 本地运行快照用于排查；不向外发送。
         var status: [String: Any] = [
             "version": appVersion, "pid": ProcessInfo.processInfo.processIdentifier,
+            "dashboardStyle": "compact-card", "dashboardVisible": dashboard.isShown,
             "updatedAt": Date().timeIntervalSince1970,
             "networkKey": tracker.context?.key ?? "", "interface": tracker.context?.interface ?? "",
             "localPollSec": config.localPollSec, "routerPollSec": config.routerPollSec,
@@ -384,6 +428,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
     @objc private func openConfig() { NSWorkspace.shared.open(Config.fileURL) }
     @objc private func openData() { NSWorkspace.shared.open(Config.supportDir) }
-    @objc private func doRefresh() { tick(); refreshRouter(force: true); saveState() }
+    @objc private func doRefresh() { tick(); refreshRouter(force: true); rebuildIfOpen(); saveState() }
     @objc private func quit() { saveState(); NSApp.terminate(nil) }
 }

@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="F50Dashboard"
 BUNDLE_ID="io.github.nowhere1975.f50dashboard"
-VERSION="0.4.1"
+VERSION="0.5.0"
 BUILD_DIR="$PROJECT_DIR/build"
 APP="$BUILD_DIR/$APP_NAME.app"
 INSTALL_DIR="$HOME/Applications"
@@ -33,7 +33,7 @@ do_test() {
   mkdir -p "$BUILD_DIR/tests"
   local sources=()
   local name
-  for name in Config Fmt SysInfo BillingCycle TrafficTracker StateStore RouterClient RouterState DashboardMenu; do
+  for name in Config Fmt SysInfo BillingCycle TrafficTracker StateStore RouterClient RouterState DashboardMenu DashboardSnapshot; do
     sources+=("$PROJECT_DIR/Sources/F50Dashboard/$name.swift")
   done
   swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx12.0" \
@@ -45,6 +45,11 @@ do_test() {
     "$PROJECT_DIR/Sources/F50Dashboard/MenuRenderer.swift" "$PROJECT_DIR/Tests/MenuRenderer/main.swift" \
     -o "$BUILD_DIR/tests/menu-regression"
   "$BUILD_DIR/tests/menu-regression"
+  swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx12.0" \
+    -framework Cocoa -framework SystemConfiguration "${sources[@]}" \
+    "$PROJECT_DIR/Sources/F50Dashboard/DashboardCard.swift" "$PROJECT_DIR/Tests/Dashboard/main.swift" \
+    -o "$BUILD_DIR/tests/dashboard-regression"
+  "$BUILD_DIR/tests/dashboard-regression"
   python3 "$PROJECT_DIR/Tests/scripts_test.py"
   bash -n "$PROJECT_DIR/build.sh"
   bash -n "$PROJECT_DIR/tools/router-traffic.sh"

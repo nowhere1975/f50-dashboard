@@ -165,7 +165,7 @@ enum DashboardMenu {
         return rows
     }
 
-    private static func name(_ key: String, tracker: TrafficTracker, config: Config) -> String {
+    static func name(_ key: String, tracker: TrafficTracker, config: Config) -> String {
         if let custom = config.networkNames[key], !custom.isEmpty { return custom }
         if key == "f50" { return "F50 Pro" }
         if let label = tracker.state.buckets[key]?.label, !label.isEmpty { return label }
