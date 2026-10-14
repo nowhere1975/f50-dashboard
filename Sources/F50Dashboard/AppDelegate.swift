@@ -4,6 +4,7 @@ import UserNotifications
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
+    private let menuRenderer = MenuRenderer()
     private var localTimer: Timer?
     private var routerTimer: Timer?
     private var saveTimer: Timer?
@@ -103,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let context = SysInfo.networkContext(interface: config.interface)
         let changed = tracker.context != context
         if changed {
+            // 切网时关闭当前快照，避免在菜单中继续浏览上个网络的数据。
+            if menuOpen { menu.cancelTracking() }
             saveState(); invalidateRouter()
             sampleGeneration &+= 1
             tracker.sample(context: context, counters: nil, uptime: ProcessInfo.processInfo.systemUptime,
@@ -200,15 +203,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        menuOpen = true
+        guard menu === self.menu else { return }
         let loaded = Config.read(fallback: config)
         if loaded.config != config { applyConfig(loaded.config) }
         configWarning = loaded.warning
         tick()
-        rebuild()
+        rebuild(allowStructureChanges: true)
+        menuOpen = true
         refreshRouter()
     }
-    func menuDidClose(_ menu: NSMenu) { menuOpen = false }
+    func menuDidClose(_ menu: NSMenu) {
+        if menu === self.menu { menuOpen = false }
+    }
     private func rebuildIfOpen() { if menuOpen { rebuild() } }
 
     private func item(_ title: String, action: Selector? = nil) -> NSMenuItem {
@@ -260,9 +266,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         return value
     }
 
-    private func rebuild() {
-        menu.removeAllItems()
-        for entry in menuEntries() { menu.addItem(menuItem(entry)) }
+    private func rebuild(allowStructureChanges: Bool? = nil) {
+        menuRenderer.update(menuEntries(), menu: menu,
+            allowStructureChanges: allowStructureChanges ?? !menuOpen, makeItem: menuItem)
     }
 
     private func saveState() {

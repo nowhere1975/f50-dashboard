@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="F50Dashboard"
 BUNDLE_ID="io.github.nowhere1975.f50dashboard"
-VERSION="0.4.0"
+VERSION="0.4.1"
 BUILD_DIR="$PROJECT_DIR/build"
 APP="$BUILD_DIR/$APP_NAME.app"
 INSTALL_DIR="$HOME/Applications"
@@ -40,6 +40,11 @@ do_test() {
     -framework SystemConfiguration "${sources[@]}" "$PROJECT_DIR/Tests/main.swift" \
     -o "$BUILD_DIR/tests/regression"
   "$BUILD_DIR/tests/regression"
+  swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx12.0" \
+    -framework Cocoa -framework SystemConfiguration "${sources[@]}" \
+    "$PROJECT_DIR/Sources/F50Dashboard/MenuRenderer.swift" "$PROJECT_DIR/Tests/MenuRenderer/main.swift" \
+    -o "$BUILD_DIR/tests/menu-regression"
+  "$BUILD_DIR/tests/menu-regression"
   python3 "$PROJECT_DIR/Tests/scripts_test.py"
   bash -n "$PROJECT_DIR/build.sh"
   bash -n "$PROJECT_DIR/tools/router-traffic.sh"

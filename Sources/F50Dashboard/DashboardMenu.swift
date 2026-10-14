@@ -2,12 +2,15 @@ import Foundation
 
 struct MenuEntry: Equatable {
     enum Action { case settings, config, data, refresh, quit }
+    let id: String
     let title: String
     let children: [MenuEntry]?
     let action: Action?
     let isSeparator: Bool
 
-    init(_ title: String, children: [MenuEntry]? = nil, action: Action? = nil, isSeparator: Bool = false) {
+    init(_ title: String, id: String? = nil, children: [MenuEntry]? = nil, action: Action? = nil, isSeparator: Bool = false) {
+        self.id = id ?? (action.map { "action.\($0)" }
+            ?? title.components(separatedBy: "  ").first(where: { !$0.isEmpty }) ?? title)
         self.title = title; self.children = children; self.action = action; self.isSeparator = isSeparator
     }
     static var separator: MenuEntry { MenuEntry("", isSeparator: true) }
@@ -20,7 +23,8 @@ enum DashboardMenu {
                         warnings: [String] = [], deviceWarnings: [String] = []) -> [MenuEntry] {
         var rows: [MenuEntry] = []
         func add(_ title: String) { rows.append(MenuEntry(title)) }
-        add("实时速率      ↓ \(Fmt.bytes(UInt64(max(0, tracker.rateRx))))/s    ↑ \(Fmt.bytes(UInt64(max(0, tracker.rateTx))))/s")
+        add(tracker.counters == nil ? "实时速率      ↓ ---    ↑ ---"
+            : "实时速率      ↓ \(Fmt.bytes(UInt64(max(0, tracker.rateRx))))/s    ↑ \(Fmt.bytes(UInt64(max(0, tracker.rateTx))))/s")
         if tracker.counters == nil { add("  本机计数读取失败，等待下一次采样") }
         rows.append(.separator)
         if let context = tracker.context {
@@ -51,17 +55,21 @@ enum DashboardMenu {
                         add("更新于        \(DateFormatter.localizedString(from: updated, dateStyle: .none, timeStyle: .medium))（\(Int(max(0, date.timeIntervalSince(updated)))) 秒前）")
                     }
                 }
-            case .loading: add("  正在读取设备数据…")
-            case .unavailable: add("  设备数据暂不可用，等待下次刷新")
+            case .loading: rows.append(MenuEntry("  正在读取设备数据…", id: "device.status"))
+            case .unavailable: rows.append(MenuEntry("  设备数据暂不可用，等待下次刷新", id: "device.status"))
             case .hidden: break
             }
             rows.append(MenuEntry("详细信息", children: deviceDetails(tracker: tracker, router: router,
                                                                     phase: phase, knownDevice: knownDevice)))
-            for warning in deviceWarnings { add("提示：\(warning)") }
+            for (index, warning) in deviceWarnings.enumerated() {
+                rows.append(MenuEntry("提示：\(warning)", id: "warning.device.\(index)"))
+            }
         }
         rows.append(.separator)
         rows.append(MenuEntry("历史用量", children: history(tracker: tracker, config: config, date: date)))
-        for warning in warnings { add("提示：\(warning)") }
+        for (index, warning) in warnings.enumerated() {
+            rows.append(MenuEntry("提示：\(warning)", id: "warning.general.\(index)"))
+        }
         rows.append(.separator)
         rows += [MenuEntry("设置…", action: .settings), MenuEntry("打开配置文件", action: .config),
                  MenuEntry("打开数据目录", action: .data), MenuEntry("刷新", action: .refresh),
@@ -71,11 +79,11 @@ enum DashboardMenu {
 
     private static func billingEntries(tracker: TrafficTracker, info: RouterInfo, config: Config,
                                        date: Date, configWarning: String?) -> [MenuEntry] {
-        guard configWarning == nil else { return [MenuEntry("SIM 卡用量    配置未加载，暂不估算余量")] }
+        guard configWarning == nil else { return [MenuEntry("SIM 卡用量    配置未加载，暂不估算余量", id: "quota.notice")] }
         var rows = [MenuEntry("SIM 卡月度用量（估算）"),
                     MenuEntry("  套餐额度    \(Fmt.trim(config.quotaGB)) GB（手动设置）")]
         guard let day = config.billingCycleDay else {
-            rows.append(MenuEntry("  请在设置中填写重置日和运营商本周期已用量"))
+            rows.append(MenuEntry("  请在设置中填写重置日和运营商本周期已用量", id: "quota.notice"))
             return rows
         }
         let period = BillingPeriod.containing(date, resetDay: day, timeZoneID: config.billingTimeZone)
@@ -91,13 +99,13 @@ enum DashboardMenu {
         if usage.canEstimateQuota {
             let used = Double(usage.total) / Fmt.giga
             let percent = used / config.quotaGB * 100
-            rows += [MenuEntry("  已用估算    \(Fmt.bytes(usage.total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%"),
+            rows += [MenuEntry("  已用估算    \(Fmt.bytes(usage.total)) / \(Fmt.trim(config.quotaGB)) GB · \(String(format: "%.2f", percent))%", id: "quota.used"),
                      MenuEntry("  估算剩余    \(String(format: "%.2f", max(0, config.quotaGB - used))) GB"),
-                     MenuEntry("  \(Fmt.bar(percent))"), MenuEntry("  套餐余量以运营商查询结果为准")]
+                     MenuEntry("  \(Fmt.bar(percent))", id: "quota.progress"), MenuEntry("  套餐余量以运营商查询结果为准", id: "quota.notice")]
         } else {
-            rows.append(MenuEntry("  月度已记录  \(Fmt.bytes(usage.total))"))
+            rows.append(MenuEntry("  月度已记录  \(Fmt.bytes(usage.total))", id: "quota.used"))
             rows.append(MenuEntry(usage.calibratedAt == nil ? "  请查询运营商本月已用量，在设置中校准"
-                : "  采样存在缺口，请用运营商已用量重新校准"))
+                : "  采样存在缺口，请用运营商已用量重新校准", id: "quota.notice"))
         }
         if config.enableQuotaAlerts && !usage.canEstimateQuota { rows.append(MenuEntry("  月度配额提醒等待用量校准")) }
         return rows
@@ -108,7 +116,7 @@ enum DashboardMenu {
         var rows: [MenuEntry] = []
         let info = phase == .ready ? router.info : nil
         if let info = info {
-            rows += [MenuEntry("型号          \(info.model)"), MenuEntry("固件          \(info.firmware)")]
+            rows += [MenuEntry("型号          \(info.model)", id: "device.model"), MenuEntry("固件          \(info.firmware)")]
             if let total = info.monthlyTotal {
                 rows += [.separator, MenuEntry("设备原始统计  \(Fmt.bytes(total))"),
                          MenuEntry("  下载/上传   \(Fmt.bytes(info.monthlyRx!)) / \(Fmt.bytes(info.monthlyTx!))"),
@@ -119,15 +127,17 @@ enum DashboardMenu {
             if info.hasStationList {
                 rows.append(.separator)
                 rows.append(MenuEntry("接入设备地址（最多列出 8 台）"))
-                rows += info.stations.prefix(8).map { MenuEntry("  \($0.ip)   \($0.mac)") }
+                rows += info.stations.prefix(8).enumerated().map {
+                    MenuEntry("  \($0.element.ip)   \($0.element.mac)", id: "device.client.\($0.offset)")
+                }
             }
-        } else if let device = knownDevice { rows.append(MenuEntry("已确认型号    \(device.model)")) }
+        } else if let device = knownDevice { rows.append(MenuEntry("已确认型号    \(device.model)", id: "device.model")) }
         if let context = tracker.context {
             rows += [.separator, MenuEntry("当前网卡      \(context.interface)"),
                      MenuEntry("当前网关      \(context.gateway)"),
                      MenuEntry("网关 MAC      \(context.gatewayMAC.isEmpty ? "未获取" : context.gatewayMAC)")]
         }
-        if let error = router.errorMessage { rows.append(MenuEntry("读取提示：\(error)")) }
+        if let error = router.errorMessage { rows.append(MenuEntry("读取提示：\(error)", id: "device.error")) }
         return rows
     }
 
@@ -137,14 +147,14 @@ enum DashboardMenu {
             for offset in 0..<7 {
                 let day = TrafficTracker.dayKey(Calendar.current.date(byAdding: .day, value: -offset, to: date)!)
                 let usage = tracker.state.daily[day]?[key]
-                days.append(MenuEntry("\(day)    \(usage.map { Fmt.bytes($0.total) } ?? "—（未记录）")"))
+                days.append(MenuEntry("\(day)    \(usage.map { Fmt.bytes($0.total) } ?? "—（未记录）")", id: "history.day.\(day)"))
             }
         } else { days.append(MenuEntry("尚未取得当前网络")) }
         var all = Usage()
         for bucket in tracker.state.buckets.values { all.rx += bucket.rx; all.tx += bucket.tx }
         var networks = [MenuEntry("全部网络累计  ↓ \(Fmt.bytes(all.rx))   ↑ \(Fmt.bytes(all.tx))"), .separator]
         for (key, bucket) in tracker.state.buckets.sorted(by: { $0.value.firstSeen > $1.value.firstSeen }) {
-            networks.append(MenuEntry("\(name(key, tracker: tracker, config: config))  ↓ \(Fmt.bytes(bucket.rx))  ↑ \(Fmt.bytes(bucket.tx))"))
+            networks.append(MenuEntry("\(name(key, tracker: tracker, config: config))  ↓ \(Fmt.bytes(bucket.rx))  ↑ \(Fmt.bytes(bucket.tx))", id: "history.network.\(key)"))
         }
         var rows = [MenuEntry("近七天（当前网络）", children: days),
                     MenuEntry("各网络累计", children: networks), .separator,
