@@ -132,8 +132,9 @@ case "${1:-build}" in
   build) do_build ;;
   test) do_test ;;
   install) do_install ;;
+  package) do_build; /bin/bash "$PROJECT_DIR/tools/package.sh" ;;
   check) "$INSTALLED_APP/Contents/MacOS/$APP_NAME" --check ;;
   uninstall) do_uninstall ;;
   clean) rm -rf "$BUILD_DIR" ;;
-  *) echo "用法：$0 {build|test|install|check|uninstall|clean}"; exit 2 ;;
+  *) echo "用法：$0 {build|test|install|package|check|uninstall|clean}"; exit 2 ;;
 esac

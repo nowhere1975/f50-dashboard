@@ -2,6 +2,14 @@
 
 macOS 菜单栏流量看板，提供本机实时网速、月度历史和可扩展路由器统计。版本：0.8.0。当前内置 F50 Pro 适配模块。
 
+## 下载安装
+
+[下载 Apple Silicon 安装包（DMG）](https://github.com/nowhere1975/f50-dashboard/releases/latest) · [安装、升级和卸载说明](docs/INSTALL.txt)
+
+打开 DMG，将 `F50Dashboard.app` 拖入「应用程序」后打开，无需开发工具。当前包尚未做 Developer ID 签名和 Apple 公证；若系统拦截，请按安装说明通过「隐私与安全性」确认打开。
+
+适合使用 Mac 和自插卡 F50 Pro 的用户试用，也能单独监控其他网络的本机网速。当前下载包为 Apple Silicon 版，实测 macOS 27、F50 Pro B27 固件；旧系统及其他固件欢迎反馈兼容情况。反馈时请附 macOS 版本、芯片、固件和 USB/Wi-Fi 连接方式。
+
 点击菜单栏打开原生菜单。菜单上方嵌入透明信息卡片，显示实时速率、当前网络、已支持路由器的 SIM 卡套餐进度条和本机月度用量方块图；下方是带右箭头的「详细信息」「历史用量」子菜单，以及设置、刷新等普通菜单项。
 
 ## 菜单显示规则
@@ -44,6 +52,7 @@ macOS 菜单栏流量看板，提供本机实时网速、月度历史和可扩�
 ./build.sh test       # 离线回归检查
 ./build.sh            # 构建当前机器架构，显式指定 macOS 12 部署目标
 ./build.sh install    # 备份旧 App、配置和累计，安装并启动
+./build.sh package    # 重新构建，生成并验证 Apple Silicon DMG 和 SHA-256
 ./build.sh check      # 检查本机采样和路由器只读接口
 ./build.sh uninstall  # 移除开机自启，将 App 留存在数据目录
 ~~~
@@ -150,6 +159,7 @@ tools/ssid-traffic.sh report
 ## 文档与许可
 
 - [适配模块开发与历史兼容](docs/ADAPTERS.md)。
+- [安装、升级和卸载](docs/INSTALL.txt)。
 - [接口协议](docs/PROTOCOL.md)：单设备、单固件的接口整理。
 - [历史踩坑与新版说明](docs/PITFALLS.md)。
 - [当前实现与验证范围](docs/REVIEW.md)。
