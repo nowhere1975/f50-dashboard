@@ -215,7 +215,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         refreshRouter()
     }
     func menuDidClose(_ menu: NSMenu) {
-        if menu === self.menu { menuOpen = false }
+        if menu === self.menu {
+            menuOpen = false
+            dashboard.state.selectedDay = nil
+        }
     }
     private func rebuildIfOpen() {
         if menuOpen { rebuild() }

@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="F50Dashboard"
 BUNDLE_ID="io.github.nowhere1975.f50dashboard"
-VERSION="0.7.0"
+VERSION="0.7.1"
 BUILD_DIR="$PROJECT_DIR/build"
 APP="$BUILD_DIR/$APP_NAME.app"
 INSTALL_DIR="$HOME/Applications"

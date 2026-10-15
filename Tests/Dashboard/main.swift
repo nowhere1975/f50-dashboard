@@ -89,6 +89,7 @@ let host = popup.view
 let hostIdentity = ObjectIdentifier(popup.item)
 let viewIdentity = ObjectIdentifier(host)
 let openingHeight = host.frame.height
+expect(popup.state.hoveredDay == nil, "day details are hidden until a square is hovered")
 expect(openingHeight > 300 && openingHeight < 600, "menu card uses measured compact height, not a 740-point panel")
 expect(popup.item.view === host && !host.isOpaque, "native menu owns a transparent card row")
 expect(!host.hosting.allowsVibrancy, "host preserves explicit primary and secondary text colors in native menus")
@@ -187,13 +188,16 @@ if CommandLine.arguments.contains("--render") {
             let square = popup.state.dayRects[day.id]!
             host.inspect(at: NSPoint(x: square.midX, y: square.midY))
             expect(popup.state.selectedDay == day.id, "native hit testing maps both rows to the exact calendar date")
+            expect(popup.state.hoveredDay?.detail == day.detail && host.frame.height == popup.state.fixedHeight,
+                   "hover reveals only the selected detail without changing menu geometry")
         }
         let firstSquare = popup.state.dayRects[data.days[0].id]!
         host.inspect(at: NSPoint(x: firstSquare.maxX + 2, y: firstSquare.midY))
         expect(popup.state.selectedDay == nil, "gaps between squares do not select an adjacent date")
         host.inspect(at: .zero)
-        expect(popup.state.selectedDay == nil, "leaving the chart restores current-day inspection")
+        expect(popup.state.selectedDay == nil && popup.state.hoveredDay == nil, "leaving the chart removes the transient detail")
     }
+    popup.state.selectedDay = nil
     try capture("light", .aqua, first)
     try capture("dark", .darkAqua, first)
     popup.state.selectedDay = "2026-10-13"
@@ -212,7 +216,7 @@ if CommandLine.arguments.contains("--render") {
     host.removeFromSuperview()
     popup.item.view = nil; popup.item.view = host
     // 使用真正 NSMenu 的跟踪循环和窗口渲染，而非把卡片放进弹出面板。
-    popup.state.selectedDay = nil
+    popup.state.selectedDay = CommandLine.arguments.contains("--hover-menu") ? "2026-10-13" : nil
     nativeMenu.appearance = NSAppearance(named: .aqua)
     DispatchQueue.main.async {
         NSApp.activate(ignoringOtherApps: true)
@@ -227,7 +231,8 @@ if CommandLine.arguments.contains("--render") {
             try? JSONSerialization.data(withJSONObject: windows, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("windows.json"))
             view.cacheDisplay(in: view.bounds, to: bitmap)
             if let data = bitmap.representation(using: .png, properties: [:]) {
-                try? data.write(to: output.appendingPathComponent("native-menu.png")); capturedMenu = true
+                let name = CommandLine.arguments.contains("--hover-menu") ? "native-menu-hover.png" : "native-menu.png"
+                try? data.write(to: output.appendingPathComponent(name)); capturedMenu = true
             }
         }
         RunLoop.main.add(timer, forMode: .common)

@@ -17,6 +17,7 @@ final class DashboardCardState: ObservableObject {
     var inspectedDay: DashboardSnapshot.Day? {
         snapshot.days.first { $0.id == selectedDay } ?? snapshot.days.first { $0.isToday }
     }
+    var hoveredDay: DashboardSnapshot.Day? { snapshot.days.first { $0.id == selectedDay } }
 }
 
 private enum DashboardPalette {
@@ -128,18 +129,11 @@ struct DashboardCard: View {
             }.frame(height: 8)
                 .accessibilityLabel(data.remainingPercent.map { "月度套餐剩余 \(String(format: "%.2f", $0))%" } ?? "套餐余量暂不可用")
             HStack(alignment: .top) {
-                Text(data.usedBytes.map { "\(data.remainingGB == nil ? "月度已记录" : "已用") \(Fmt.bytes($0)) / \(Fmt.trim(data.quotaGB)) GB" }
+                Text(data.usedBytes.map { "本月用量 \(Fmt.bytes($0)) / \(Fmt.trim(data.quotaGB)) GB" }
                     ?? "套餐 \(Fmt.trim(data.quotaGB)) GB（手动设置）")
                 Spacer(minLength: 5)
                 Text(data.reset).foregroundColor(Color(nsColor: .secondaryLabelColor))
             }.font(.system(size: 12))
-            if !data.quotaNotice.isEmpty {
-                Text(data.quotaNotice).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
-            }
-            if !data.period.isEmpty {
-                Text(data.period).font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
-            }
-            Text("余量以运营商查询结果为准").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             if !data.signal.isEmpty {
                 HStack { Text(data.signal); Spacer(); Text(data.stationCount) }.font(.system(size: 12))
             }
@@ -166,16 +160,22 @@ struct DashboardCard: View {
                     }
                 }
             }.padding(.vertical, 3).background(ChartTrackingRegion(state: state))
+                .overlay(alignment: .topLeading) {
+                    if let day = state.hoveredDay {
+                        Text(day.detail).font(.system(size: 11)).monospacedDigit()
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: 260, alignment: .leading).padding(8)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .windowBackgroundColor)))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15)))
+                            .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
+                            .offset(x: 24, y: -58).allowsHitTesting(false)
+                    }
+                }.zIndex(1)
             HStack(spacing: 12) {
                 legend("F50 Pro", filled: true, color: DashboardPalette.teal)
                 legend("无 F50 Pro", filled: true, color: Color.primary.opacity(0.12))
                 legend("未记录", filled: false, color: Color.secondary.opacity(0.4))
             }.font(.system(size: 10)).foregroundColor(Color(nsColor: .secondaryLabelColor))
-            Text(state.inspectedDay?.detail ?? "悬停方块查看每日用量")
-                .font(.system(size: 11)).monospacedDigit().lineLimit(2)
-                .frame(height: 32, alignment: .topLeading)
-            Text("本月已记录 \(data.recordedDays) 天 · 仅含 App 的有效采样")
-                .font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
         }.padding(.horizontal, 18).padding(.vertical, 10)
     }
 
