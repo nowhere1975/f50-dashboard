@@ -24,9 +24,11 @@ struct PersistedState: Codable {
     var alerts: [String: AlertRecord] = [:]
     var billing: [String: [String: BillingUsage]] = [:]
     var devices: [String: ConfirmedDevice] = [:]
+    // 历史归属与当前设备识别分开保存；设备暂不可用或被移除时不改写旧用量的分类。
+    var f50Networks: Set<String> = []
 
     init() {}
-    private enum CodingKeys: String, CodingKey { case buckets, daily, alerts, billing, devices }
+    private enum CodingKeys: String, CodingKey { case buckets, daily, alerts, billing, devices, f50Networks }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         buckets = try c.decode([String: Bucket].self, forKey: .buckets)
@@ -34,6 +36,12 @@ struct PersistedState: Codable {
         alerts = try c.decodeIfPresent([String: AlertRecord].self, forKey: .alerts) ?? [:]
         billing = try c.decodeIfPresent([String: [String: BillingUsage]].self, forKey: .billing) ?? [:]
         devices = try c.decodeIfPresent([String: ConfirmedDevice].self, forKey: .devices) ?? [:]
+        f50Networks = try c.decodeIfPresent(Set<String>.self, forKey: .f50Networks) ?? []
+        f50Networks.formUnion(devices.keys)
+        guard f50Networks.allSatisfy({ key in
+            key.hasPrefix("mac:") && SysInfo.normalizeMAC(String(key.dropFirst(4))) == String(key.dropFirst(4))
+                && !String(key.dropFirst(4)).isEmpty
+        }) else { throw ConfigError(message: "历史网络归属无效") }
         for (key, device) in devices {
             guard key.hasPrefix("mac:"), !SysInfo.normalizeMAC(String(key.dropFirst(4))).isEmpty,
                   key == "mac:\(device.gatewayMAC)", SysInfo.normalizeMAC(device.gatewayMAC) == device.gatewayMAC,
@@ -155,6 +163,7 @@ struct TrafficTracker {
         guard key.hasPrefix("mac:"), !SysInfo.normalizeMAC(String(key.dropFirst(4))).isEmpty,
               info.responded, !info.model.isEmpty else { return }
         if info.isF50Pro {
+            state.f50Networks.insert(key)
             state.devices[key] = ConfirmedDevice(gatewayMAC: String(key.dropFirst(4)), model: info.model, verifiedAt: date)
             dirty = true
         } else if state.devices.removeValue(forKey: key) != nil { dirty = true }

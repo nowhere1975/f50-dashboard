@@ -29,8 +29,13 @@ func snapshot(_ configWarning: String? = nil) -> DashboardSnapshot {
     DashboardSnapshot.make(tracker: tracker, router: router, config: config, date: now,
                            configWarning: configWarning, deviceWarnings: ["device-only warning"])
 }
-tracker.state.daily["2026-10-13"] = [pro.key: Usage(rx: 590_000_000, tx: 3_000_000)]
-tracker.state.daily["2026-10-14"] = [pro.key: Usage(rx: 2_300_000_000, tx: 80_000_000)]
+tracker.state.daily["2026-09-30"] = [pro.key: Usage(rx: 99_000_000_000)]
+tracker.state.daily["2026-10-11"] = [home.key: Usage()]
+tracker.state.daily["2026-10-12"] = [home.key: Usage(rx: 500_000_000)]
+tracker.state.daily["2026-10-13"] = [pro.key: Usage(rx: 590_000_000, tx: 3_000_000), home.key: Usage(rx: 100_000_000)]
+tracker.state.daily["2026-10-14"] = [pro.key: Usage(rx: 2_300_000_000, tx: 80_000_000), home.key: Usage(rx: 500_000_000)]
+tracker.state.daily["2026-10-20"] = [pro.key: Usage(rx: 8_000_000_000)] // 时钟异常留下的未来记录不纳入当月已用。
+tracker.state.daily["2026-11-01"] = [pro.key: Usage(rx: 88_000_000_000)]
 let encodedBefore = try JSONEncoder().encode(tracker.state)
 var first = snapshot()
 first.warnings = []
@@ -38,16 +43,45 @@ expect(first.phase == .ready, "confirmed current Pro creates quota card")
 expect(abs(first.remainingGB! - 172.97) < 0.000001, "remaining comes from calibrated SIM baseline")
 expect(first.usedBytes == 27_030_000_000, "SIM baseline does not use raw router counter")
 expect(first.reset == "11 月 1 日重置", "reset uses next cycle boundary in billing timezone")
-expect(first.days.count == 7 && first.days.last!.isToday, "chart is chronological and includes current partial day")
+expect(first.days.count == 31 && first.days[13].isToday && first.days.last!.isFuture, "month includes every date and distinguishes today and future")
 expect(first.days.first!.total == nil, "unrecorded dates stay unknown")
-expect(first.days.last!.total == 2_380_000_000, "chart uses local daily totals, not SIM calibration")
+expect(first.days[13].total == 2_880_000_000 && first.days[13].f50Total == 2_380_000_000, "all-network local total includes F50 without SIM calibration or double counting")
+expect(first.monthTotal == 4_073_000_000 && first.monthF50Total == 2_973_000_000 && first.monthOtherTotal == 1_100_000_000,
+       "month sums both directions across networks and excludes adjacent months and future records")
+expect(first.recordedDays == 4, "valid zero counts as an observed day, unknown and future dates do not")
+expect(first.days[10].total == 0 && !first.days[10].hasF50, "a recorded idle day is gray, not an unknown empty square")
+expect(first.days[12].detail.contains("F50 Pro") && first.days[12].detail.contains("本机总量")
+       && !first.days[11].detail.contains("F50 Pro"), "hover details distinguish colored and gray days")
+expect(first.days[19].total == nil && first.days[19].detail.contains("尚未到来"), "future days cannot display collected use")
 let encodedAfter = try JSONEncoder().encode(tracker.state)
 let beforeObject = try JSONSerialization.jsonObject(with: encodedBefore) as! NSDictionary
 let afterObject = try JSONSerialization.jsonObject(with: encodedAfter) as! NSDictionary
 expect(beforeObject == afterObject, "building a card never mutates saved statistics")
-expect(DailyChartScale(days: first.days).unit == "GB", "daily chart selects correct unit")
-expect(DailyChartScale(days: first.days).ceiling == 2.5, "chart scale pads the observed maximum")
-expect(DailyChartScale(days: first.days).label(1.25) == "1.25", "axis labels preserve fractional tick precision")
+for (text, count) in [("2024-02-18T09:00:00+08:00", 29), ("2025-02-18T09:00:00+08:00", 28),
+                      ("2026-04-18T09:00:00+08:00", 30), ("2026-12-18T09:00:00+08:00", 31)] {
+    let day = ISO8601DateFormatter().date(from: text)!
+    let empty = DashboardSnapshot.make(tracker: TrafficTracker(), router: RouterState(), config: config, date: day)
+    expect(empty.days.count == count, "calendar uses actual month length, including leap February")
+    expect(empty.monthTotal == nil && empty.monthF50Total == nil && empty.monthOtherTotal == nil,
+           "empty month is unknown, never invented zero")
+}
+var classification = tracker
+var otherModel = info; otherModel.model = "MF79"
+classification.rememberDevice(otherModel, key: pro.key, date: now)
+expect(classification.state.devices[pro.key] == nil && classification.state.f50Networks.contains(pro.key),
+       "current device proof can expire without erasing historical classification")
+let savedHistory = try JSONDecoder().decode(PersistedState.self, from: JSONEncoder().encode(classification.state))
+classification.state = savedHistory
+expect(DashboardSnapshot.make(tracker: classification, router: RouterState(), config: config, date: now).monthF50Total == first.monthF50Total,
+       "historical classification and monthly totals survive reload without current device proof")
+var legacyObject = beforeObject as! [String: Any]; legacyObject.removeValue(forKey: "f50Networks")
+let legacyState = try JSONDecoder().decode(PersistedState.self, from: JSONSerialization.data(withJSONObject: legacyObject))
+expect(legacyState.f50Networks.contains(pro.key), "old files seed historical classification from confirmed model evidence")
+legacyObject["f50Networks"] = ["iface:unverified"]
+do {
+    _ = try JSONDecoder().decode(PersistedState.self, from: JSONSerialization.data(withJSONObject: legacyObject))
+    expect(false, "invalid historical identity must be rejected")
+} catch { expect(true, "invalid historical identity cannot silently change usage attribution") }
 expect(snapshot("config invalid").remainingGB == nil, "invalid config cannot estimate quota")
 let popup = DashboardMenuCard(version: "test")
 popup.update(first, allowResize: true)
@@ -99,15 +133,11 @@ tracker.setLabel("F50 Pro", for: home.key)
 popup.update(snapshot(), allowResize: false)
 expect(popup.state.snapshot.phase == .hidden && popup.state.snapshot.details.isEmpty
        && popup.state.snapshot.remainingGB == nil && popup.state.snapshot.warnings.isEmpty, "home router with Pro alias hides the device card and warnings")
-expect(popup.state.selectedDay == nil, "network switch clears previous-network browsing state")
-expect(popup.state.snapshot.days.dropLast().allSatisfy { $0.total == nil }
-       && popup.state.snapshot.days.last!.total == 0, "home chart shows its valid zero sample without borrowing Pro daily data")
+expect(popup.state.selectedDay == "2026-10-13", "network switch retains all-network monthly browsing")
+expect(popup.state.snapshot.days[12].hasF50 && popup.state.snapshot.days[11].f50Total == 0,
+       "other networks keep Pro history visible and a user alias cannot manufacture Pro identity")
 let zeros = [DashboardSnapshot.Day(id: "zero", total: 0, isToday: false), DashboardSnapshot.Day(id: "unknown", total: nil, isToday: true)]
 expect(zeros[0].detail.contains("0 B") && zeros[1].detail.contains("未记录"), "zero and unknown have distinct descriptions")
-for total: UInt64 in [0, 2, 3_000, 4_000_000, 5_000_000_000] {
-    let scale = DailyChartScale(days: [.init(id: "value", total: total, isToday: true)])
-    expect(scale.ceiling > 0 && scale.fraction(total) <= 1 && scale.fraction(total).isFinite, "scale stays finite and bounds small or large values")
-}
 expect(DashboardSnapshot.Rate(nil).value == "—" && DashboardSnapshot.Rate(.nan).value == "—", "invalid rates use unknown, not zero")
 expect(DashboardSnapshot.Rate(0).value == "0", "valid idle rate remains zero")
 
@@ -151,18 +181,32 @@ if CommandLine.arguments.contains("--render") {
         host.cacheDisplay(in: host.bounds, to: bitmap)
         try bitmap.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent("\(name).png"))
         let rect = popup.state.chartRect
-        expect(rect.width > 100 && rect.height > 60, "chart exposes real plot geometry for menu hover inspection: \(rect)")
-        host.inspect(at: NSPoint(x: rect.minX + 35 + (rect.width - 35) * 5.5 / 7, y: rect.midY))
-        expect(popup.state.selectedDay == data.days[5].id, "native hit testing inspects the hovered day")
+        expect(rect.width > 300 && rect.height > 30, "month grid exposes real geometry for menu hover inspection: \(rect)")
+        expect(popup.state.dayRects.count == data.days.count, "every calendar square has a native hover region: \(popup.state.dayRects.count)/\(data.days.count), missing \(data.days.filter { popup.state.dayRects[$0.id] == nil }.map(\.id))")
+        for day in data.days {
+            let square = popup.state.dayRects[day.id]!
+            host.inspect(at: NSPoint(x: square.midX, y: square.midY))
+            expect(popup.state.selectedDay == day.id, "native hit testing maps both rows to the exact calendar date")
+        }
+        let firstSquare = popup.state.dayRects[data.days[0].id]!
+        host.inspect(at: NSPoint(x: firstSquare.maxX + 2, y: firstSquare.midY))
+        expect(popup.state.selectedDay == nil, "gaps between squares do not select an adjacent date")
         host.inspect(at: .zero)
         expect(popup.state.selectedDay == nil, "leaving the chart restores current-day inspection")
     }
     try capture("light", .aqua, first)
     try capture("dark", .darkAqua, first)
+    popup.state.selectedDay = "2026-10-13"
+    try capture("hover-f50", .aqua, first)
+    popup.state.selectedDay = "2026-10-12"
+    try capture("hover-other", .aqua, first)
     var unavailable = first; unavailable.phase = .unavailable; unavailable.remainingGB = nil; unavailable.remainingPercent = nil
     unavailable.usedBytes = nil; unavailable.signal = ""; unavailable.quotaNotice = "设备数据暂不可用，等待下次刷新"; unavailable.details = []
     try capture("unavailable", .aqua, unavailable)
     try capture("home", .aqua, snapshot())
+    let february = DashboardSnapshot.make(tracker: TrafficTracker(), router: RouterState(), config: config,
+        date: ISO8601DateFormatter().date(from: "2024-02-18T09:00:00+08:00")!)
+    try capture("february", .aqua, february)
     try capture("light", .aqua, first)
     window.orderOut(nil)
     host.removeFromSuperview()

@@ -5,18 +5,17 @@ final class DashboardCardState: ObservableObject {
     @Published var fixedHeight: CGFloat?
     @Published var layoutHasDevice = false
     var chartRect: CGRect = .zero
+    var dayRects: [String: CGRect] = [:]
     @Published private(set) var snapshot = DashboardSnapshot()
     @Published var selectedDay: String?
 
     func update(_ next: DashboardSnapshot) {
-        if next.networkKey != snapshot.networkKey {
-            selectedDay = nil
-        }
         if let selected = selectedDay, !next.days.contains(where: { $0.id == selected }) { selectedDay = nil }
+        dayRects = dayRects.filter { key, _ in next.days.contains { $0.id == key } }
         if next != snapshot { snapshot = next }
     }
     var inspectedDay: DashboardSnapshot.Day? {
-        snapshot.days.first { $0.id == selectedDay } ?? snapshot.days.last
+        snapshot.days.first { $0.id == selectedDay } ?? snapshot.days.first { $0.isToday }
     }
 }
 
@@ -148,34 +147,65 @@ struct DashboardCard: View {
     }
 
     private var chart: some View {
-        let scale = DailyChartScale(days: data.days)
-        return VStack(alignment: .leading, spacing: 7) {
-            sectionTitle("近七天本机用量", caption: "当前网络 · \(scale.unit)")
-            HStack(alignment: .top, spacing: 5) {
-                VStack(alignment: .leading) {
-                    Text(scale.label(scale.ceiling)); Spacer(); Text(scale.label(scale.ceiling / 2)); Spacer(); Text("0")
-                }.font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor)).frame(width: 30, height: 75)
-                ForEach(data.days) { day in
-                    VStack(spacing: 5) {
-                        ZStack(alignment: .bottom) {
-                            Color.clear
-                            if let total = day.total, total > 0 {
-                                RoundedRectangle(cornerRadius: 3).fill(DashboardPalette.teal)
-                                    .opacity(state.inspectedDay?.id == day.id ? 1 : 0.55)
-                                    .frame(width: 23, height: 75 * scale.fraction(total))
-                            } else {
-                                Text(day.total == nil ? "—" : "0").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
-                            }
-                        }.frame(height: 75)
-                        Text(day.shortLabel).font(.system(size: 11, weight: state.inspectedDay?.id == day.id ? .semibold : .regular))
-                            .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                    }.frame(maxWidth: .infinity).help(day.detail).accessibilityLabel(day.detail)
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("本机月度用量", caption: data.monthTitle)
+            HStack(spacing: 8) {
+                monthAmount("本月总量", bytes: data.monthTotal)
+                monthAmount("F50 Pro", bytes: data.monthF50Total, color: DashboardPalette.teal)
+                monthAmount("其他网络", bytes: data.monthOtherTotal)
+            }
+            VStack(spacing: 4) {
+                ForEach(0..<2) { row in
+                    HStack(spacing: 4) {
+                        ForEach(0..<16) { column in
+                            let index = row * 16 + column
+                            if index < data.days.count {
+                                dayCell(data.days[index]).id(data.days[index].id)
+                            } else { Color.clear.frame(width: 16.5, height: 16.5) }
+                        }
+                    }
                 }
-            }.padding(.top, 3)
-                .background(ChartTrackingRegion(state: state))
-            Text(state.inspectedDay?.detail ?? "尚未取得当前网络记录").font(.system(size: 12)).monospacedDigit()
-            Text("— 表示未记录，仅含 App 的有效采样").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+            }.padding(.vertical, 3).background(ChartTrackingRegion(state: state))
+            HStack(spacing: 12) {
+                legend("F50 Pro", filled: true, color: DashboardPalette.teal)
+                legend("无 F50 Pro", filled: true, color: Color.primary.opacity(0.12))
+                legend("未记录", filled: false, color: Color.secondary.opacity(0.4))
+            }.font(.system(size: 10)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+            Text(state.inspectedDay?.detail ?? "悬停方块查看每日用量")
+                .font(.system(size: 11)).monospacedDigit().lineLimit(2)
+                .frame(height: 32, alignment: .topLeading)
+            Text("本月已记录 \(data.recordedDays) 天 · 仅含 App 的有效采样")
+                .font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
         }.padding(.horizontal, 18).padding(.vertical, 10)
+    }
+
+    private func monthAmount(_ title: String, bytes: UInt64?, color: Color = Color(nsColor: .labelColor)) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+            Text(bytes.map(Fmt.bytes) ?? "—").font(.system(size: 14, weight: .semibold))
+                .monospacedDigit().foregroundColor(color).lineLimit(1).minimumScaleFactor(0.8)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func dayCell(_ day: DashboardSnapshot.Day) -> some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(day.hasF50 ? DashboardPalette.teal : day.total != nil ? Color.primary.opacity(0.09) : .clear)
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(
+                state.inspectedDay?.id == day.id ? Color(nsColor: .labelColor).opacity(0.65)
+                    : day.total == nil ? Color.secondary.opacity(day.isFuture ? 0.12 : 0.35) : .clear,
+                lineWidth: state.inspectedDay?.id == day.id ? 1.5 : 1))
+            .frame(width: 16.5, height: 16.5)
+            .background(ChartTrackingRegion(state: state, dayID: day.id))
+            .help(day.detail).accessibilityLabel(day.detail)
+    }
+
+    private func legend(_ title: String, filled: Bool, color: Color) -> some View {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 2).fill(filled ? color : .clear)
+                .overlay(RoundedRectangle(cornerRadius: 2).stroke(filled ? .clear : color, lineWidth: 1))
+                .frame(width: 8, height: 8)
+            Text(title)
+        }
     }
 
     private func sectionTitle(_ title: String, caption: String) -> some View {
@@ -185,13 +215,15 @@ struct DashboardCard: View {
 
 private struct ChartTrackingRegion: NSViewRepresentable {
     let state: DashboardCardState
-    func makeNSView(context: Context) -> ChartRegionNSView { ChartRegionNSView(state: state) }
+    var dayID: String? = nil
+    func makeNSView(context: Context) -> ChartRegionNSView { ChartRegionNSView(state: state, dayID: dayID) }
     func updateNSView(_ view: ChartRegionNSView, context: Context) { view.reportFrame() }
 }
 
 private final class ChartRegionNSView: NSView {
     weak var state: DashboardCardState?
-    init(state: DashboardCardState) { self.state = state; super.init(frame: .zero) }
+    let dayID: String?
+    init(state: DashboardCardState, dayID: String?) { self.state = state; self.dayID = dayID; super.init(frame: .zero) }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layout() { super.layout(); reportFrame() }
     override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); reportFrame() }
@@ -202,7 +234,14 @@ private final class ChartRegionNSView: NSView {
         var ancestor = superview
         while let view = ancestor {
             if let card = view as? DashboardMenuCardView {
-                state?.chartRect = convert(bounds, to: card); return
+                let rect = convert(bounds, to: card)
+                if let id = dayID {
+                    // 月份切换时，正在退出的旧视图仍可能收到一次布局回调。
+                    guard state?.snapshot.days.contains(where: { $0.id == id }) == true else { return }
+                    state?.dayRects[id] = rect
+                }
+                else { state?.chartRect = rect }
+                return
             }
             ancestor = view.superview
         }
@@ -261,13 +300,9 @@ final class DashboardMenuCardView: NSView {
     override func mouseDown(with event: NSEvent) { inspect(at: convert(event.locationInWindow, from: nil)) }
     override func mouseUp(with event: NSEvent) { inspect(at: convert(event.locationInWindow, from: nil)) }
     func inspect(at point: NSPoint) {
-        let plot = state.chartRect
-        let left = plot.minX + 35
-        guard plot.contains(point), point.x >= left, plot.width > 35, !state.snapshot.days.isEmpty else {
-            state.selectedDay = nil; return
-        }
-        let index = min(state.snapshot.days.count - 1, Int((point.x - left) / (plot.width - 35) * Double(state.snapshot.days.count)))
-        state.selectedDay = state.snapshot.days[index].id
+        state.selectedDay = state.snapshot.days.first { day in
+            state.dayRects[day.id]?.contains(point) == true
+        }?.id
     }
 }
 

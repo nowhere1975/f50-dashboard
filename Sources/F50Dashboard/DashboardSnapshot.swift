@@ -15,8 +15,17 @@ struct DashboardSnapshot: Equatable {
         let id: String
         let total: UInt64?
         let isToday: Bool
+        var f50Total: UInt64? = nil
+        var isFuture = false
         var shortLabel: String { String(id.suffix(2)) }
-        var detail: String { "\(id) · \(total.map(Fmt.bytes) ?? "未记录")\(isToday ? " · 当日累计" : "")" }
+        var hasF50: Bool { (f50Total ?? 0) > 0 }
+        var otherTotal: UInt64? { total.flatMap { total in f50Total.map { total - min(total, $0) } } }
+        var detail: String {
+            if isFuture { return "\(id) · 尚未到来" }
+            guard let total = total else { return "\(id) · 未记录" }
+            let title = "\(id) · 本机总量 \(Fmt.bytes(total))"
+            return hasF50 ? title + "\nF50 Pro \(Fmt.bytes(f50Total!)) · 其他 \(Fmt.bytes(otherTotal!))" : title
+        }
     }
     var networkKey = ""
     var networkName = "等待系统网络信息"
@@ -37,6 +46,11 @@ struct DashboardSnapshot: Equatable {
     var stationCount = ""
     var updated = ""
     var days: [Day] = []
+    var monthTitle = ""
+    var monthTotal: UInt64?
+    var monthF50Total: UInt64?
+    var monthOtherTotal: UInt64? { monthTotal.flatMap { total in monthF50Total.map { total - min(total, $0) } } }
+    var recordedDays: Int { days.filter { $0.total != nil }.count }
     var details: [MenuEntry] = []
     var history: [MenuEntry] = []
     var warnings: [String] = []
@@ -58,14 +72,10 @@ struct DashboardSnapshot: Equatable {
         value.phase = router.moduleState(current: tracker.context,
             knownDevice: tracker.context.flatMap { tracker.state.devices[$0.key] })
         value.details = entries.first { $0.title == "详细信息" }?.children ?? []
-        // 七天数据已在图中呈现；展开历史仍可查各网络累计和系统网卡累计。
-        value.history = (entries.first { $0.title == "历史用量" }?.children ?? []).filter { $0.title != "近七天（当前网络）" }
+        // 月度图汇总所有网络；历史子菜单仍可查当前网络七天明细和各网络累计。
+        value.history = entries.first { $0.title == "历史用量" }?.children ?? []
         value.warnings = warnings + (value.phase == .hidden ? [] : deviceWarnings)
-        for offset in (0..<7).reversed() {
-            let day = TrafficTracker.dayKey(Calendar.current.date(byAdding: .day, value: -offset, to: date)!)
-            let usage = tracker.context.flatMap { tracker.state.daily[day]?[$0.key] }
-            value.days.append(Day(id: day, total: usage?.total, isToday: offset == 0))
-        }
+        value.loadMonth(tracker.state, date: date)
         guard value.phase != .hidden else { return value }
         value.quotaGB = config.quotaGB
         if let day = config.billingCycleDay {
@@ -101,27 +111,34 @@ struct DashboardSnapshot: Equatable {
         value.remainingPercent = min(100, max(0, value.remainingGB! / config.quotaGB * 100))
         return value
     }
-}
 
-struct DailyChartScale: Equatable {
-    let divisor: Double
-    let unit: String
-    let ceiling: Double
-    init(days: [DashboardSnapshot.Day]) {
-        let maximum = Double(days.compactMap(\.total).max() ?? 0)
-        if maximum == 0 || maximum >= Fmt.giga { divisor = Fmt.giga; unit = "GB" }
-        else if maximum >= Fmt.mega { divisor = Fmt.mega; unit = "MB" }
-        else if maximum >= Fmt.kilo { divisor = Fmt.kilo; unit = "KB" }
-        else { divisor = 1; unit = "B" }
-        let scaled = max(1, maximum / divisor)
-        let base = pow(10, floor(log10(scaled)))
-        ceiling = ([1.0, 2, 2.5, 5, 10].first { $0 >= scaled / base } ?? 10) * base
-    }
-    func fraction(_ total: UInt64) -> Double { min(1, Double(total) / divisor / ceiling) }
-    func label(_ value: Double) -> String {
-        var result = String(format: "%.2f", value)
-        while result.last == "0" { result.removeLast() }
-        if result.last == "." { result.removeLast() }
-        return result
+    private mutating func loadMonth(_ state: PersistedState, date: Date) {
+        let calendar = Calendar.current
+        guard let start = calendar.dateInterval(of: .month, for: date)?.start,
+              let range = calendar.range(of: .day, in: .month, for: date) else { return }
+        let components = calendar.dateComponents([.year, .month], from: date)
+        monthTitle = "\(components.year!) 年 \(components.month!) 月"
+        let today = TrafficTracker.dayKey(date)
+        let f50Keys = state.f50Networks.union(state.devices.keys)
+        func sum(_ amounts: [UInt64]) -> UInt64? {
+            var total: UInt64 = 0
+            for amount in amounts {
+                let next = total.addingReportingOverflow(amount)
+                guard !next.overflow else { return nil }
+                total = next.partialValue
+            }
+            return total
+        }
+        for index in range {
+            let day = TrafficTracker.dayKey(calendar.date(byAdding: .day, value: index - 1, to: start)!)
+            let future = day > today
+            let records = future ? nil : state.daily[day]
+            let total = records.flatMap { $0.isEmpty ? nil : sum($0.values.map(\.total)) }
+            let f50 = total == nil ? nil : sum(records!.filter { f50Keys.contains($0.key) }.map { $0.value.total })
+            days.append(Day(id: day, total: total, isToday: day == today, f50Total: f50, isFuture: future))
+        }
+        guard recordedDays > 0 else { return }
+        monthTotal = sum(days.compactMap(\.total))
+        monthF50Total = sum(days.compactMap(\.f50Total))
     }
 }
