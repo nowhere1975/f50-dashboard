@@ -10,8 +10,8 @@ var tracker = TrafficTracker()
 tracker.sample(context: pro, counters: InterfaceCounters(rx: 1000, tx: 100), uptime: 0, date: now, maxGap: 30)
 tracker.setLabel("F50 Pro", for: pro.key)
 var info = RouterInfo()
-info.responded = true; info.model = "F50ProV1.0.0B27"; info.firmware = "MU3356V1.0.0B27"
-info.monthlyRx = 28_000_000; info.monthlyTx = 27_000_000; info.usedFields = "fixture"
+info.adapter = F50ProAdapter().descriptor; info.responded = true; info.model = "F50ProV1.0.0B27"; info.firmware = "MU3356V1.0.0B27"
+info.counterRx = 28_000_000; info.counterTx = 27_000_000; info.counterSource = "fixture"
 info.netType = "LTE"; info.sigBar = "5"; info.rsrp = "-92"; info.wanIP = "10.2.3.4"
 info.hasStationList = true; info.stations = [(mac: "aa:bb:cc:dd:ee:ff", ip: "192.168.0.101")]
 tracker.rememberDevice(info, key: pro.key, date: now)
@@ -45,11 +45,11 @@ expect(first.usedBytes == 27_030_000_000, "SIM baseline does not use raw router 
 expect(first.reset == "11 月 1 日重置", "reset uses next cycle boundary in billing timezone")
 expect(first.days.count == 31 && first.days[13].isToday && first.days.last!.isFuture, "month includes every date and distinguishes today and future")
 expect(first.days.first!.total == nil, "unrecorded dates stay unknown")
-expect(first.days[13].total == 2_880_000_000 && first.days[13].f50Total == 2_380_000_000, "all-network local total includes F50 without SIM calibration or double counting")
-expect(first.monthTotal == 4_073_000_000 && first.monthF50Total == 2_973_000_000 && first.monthOtherTotal == 1_100_000_000,
+expect(first.days[13].total == 2_880_000_000 && first.days[13].routerTotal == 2_380_000_000, "all-network local total includes F50 without SIM calibration or double counting")
+expect(first.monthTotal == 4_073_000_000 && first.monthRouterTotal == 2_973_000_000 && first.monthOtherTotal == 1_100_000_000,
        "month sums both directions across networks and excludes adjacent months and future records")
 expect(first.recordedDays == 4, "valid zero counts as an observed day, unknown and future dates do not")
-expect(first.days[10].total == 0 && !first.days[10].hasF50, "a recorded idle day is gray, not an unknown empty square")
+expect(first.days[10].total == 0 && !first.days[10].hasRouterTraffic, "a recorded idle day is gray, not an unknown empty square")
 expect(first.days[12].detail.contains("F50 Pro") && first.days[12].detail.contains("本机总量")
        && !first.days[11].detail.contains("F50 Pro"), "hover details distinguish colored and gray days")
 expect(first.days[19].total == nil && first.days[19].detail.contains("尚未到来"), "future days cannot display collected use")
@@ -62,21 +62,21 @@ for (text, count) in [("2024-02-18T09:00:00+08:00", 29), ("2025-02-18T09:00:00+0
     let day = ISO8601DateFormatter().date(from: text)!
     let empty = DashboardSnapshot.make(tracker: TrafficTracker(), router: RouterState(), config: config, date: day)
     expect(empty.days.count == count, "calendar uses actual month length, including leap February")
-    expect(empty.monthTotal == nil && empty.monthF50Total == nil && empty.monthOtherTotal == nil,
+    expect(empty.monthTotal == nil && empty.monthRouterTotal == nil && empty.monthOtherTotal == nil,
            "empty month is unknown, never invented zero")
 }
 var classification = tracker
 var otherModel = info; otherModel.model = "MF79"
 classification.rememberDevice(otherModel, key: pro.key, date: now)
-expect(classification.state.devices[pro.key] == nil && classification.state.f50Networks.contains(pro.key),
+expect(classification.state.devices[pro.key] == nil && classification.state.routerNetworks[pro.key] != nil,
        "current device proof can expire without erasing historical classification")
 let savedHistory = try JSONDecoder().decode(PersistedState.self, from: JSONEncoder().encode(classification.state))
 classification.state = savedHistory
-expect(DashboardSnapshot.make(tracker: classification, router: RouterState(), config: config, date: now).monthF50Total == first.monthF50Total,
+expect(DashboardSnapshot.make(tracker: classification, router: RouterState(), config: config, date: now).monthRouterTotal == first.monthRouterTotal,
        "historical classification and monthly totals survive reload without current device proof")
-var legacyObject = beforeObject as! [String: Any]; legacyObject.removeValue(forKey: "f50Networks")
+var legacyObject = beforeObject as! [String: Any]; legacyObject.removeValue(forKey: "f50Networks"); legacyObject.removeValue(forKey: "routerNetworks")
 let legacyState = try JSONDecoder().decode(PersistedState.self, from: JSONSerialization.data(withJSONObject: legacyObject))
-expect(legacyState.f50Networks.contains(pro.key), "old files seed historical classification from confirmed model evidence")
+expect(legacyState.routerNetworks[pro.key] != nil, "old files seed historical classification from confirmed model evidence")
 legacyObject["f50Networks"] = ["iface:unverified"]
 do {
     _ = try JSONDecoder().decode(PersistedState.self, from: JSONSerialization.data(withJSONObject: legacyObject))
@@ -124,7 +124,7 @@ tracker.state.billing[pro.key]![gap.period.key] = gap
 expect(snapshot().remainingGB == nil && snapshot().quotaNotice.contains("缺口"), "sampling gap never displays a confident balance")
 try tracker.sampleBilling(info, key: pro.key, config: config, date: now, calibratedGB: 210)
 expect(snapshot().remainingGB == 0 && snapshot().remainingPercent == 0, "over-quota use clamps progress and balance to zero")
-var noCounts = info; noCounts.monthlyRx = nil
+var noCounts = info; noCounts.counterRx = nil
 request = router.begin(network: pro, gateway: pro.gateway)
 router.accept(noCounts, request: request, current: pro, date: now)
 expect(snapshot().remainingGB == nil, "missing current device counts cannot retain estimate")
@@ -135,7 +135,7 @@ popup.update(snapshot(), allowResize: false)
 expect(popup.state.snapshot.phase == .hidden && popup.state.snapshot.details.isEmpty
        && popup.state.snapshot.remainingGB == nil && popup.state.snapshot.warnings.isEmpty, "home router with Pro alias hides the device card and warnings")
 expect(popup.state.selectedDay == "2026-10-13", "network switch retains all-network monthly browsing")
-expect(popup.state.snapshot.days[12].hasF50 && popup.state.snapshot.days[11].f50Total == 0,
+expect(popup.state.snapshot.days[12].hasRouterTraffic && popup.state.snapshot.days[11].routerTotal == 0,
        "other networks keep Pro history visible and a user alias cannot manufacture Pro identity")
 let zeros = [DashboardSnapshot.Day(id: "zero", total: 0, isToday: false), DashboardSnapshot.Day(id: "unknown", total: nil, isToday: true)]
 expect(zeros[0].detail.contains("0 B") && zeros[1].detail.contains("未记录"), "zero and unknown have distinct descriptions")

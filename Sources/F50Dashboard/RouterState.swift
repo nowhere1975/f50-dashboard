@@ -4,24 +4,34 @@ struct RouterRequest: Equatable {
     let serial: UInt64
     let network: NetworkContext
     let gateway: String
-
-    var targetsCurrentGateway: Bool {
-        URLComponents(string: "http://\(gateway)")?.host == network.gateway
-    }
+    var targetsCurrentGateway: Bool { URLComponents(string: "http://\(gateway)")?.host == network.gateway }
 }
 
 struct ConfirmedDevice: Codable {
     let gatewayMAC: String
     let model: String
     let verifiedAt: Date
+    var adapterID: String? = nil
+    var displayName: String? = nil
+
+    func descriptor(in registry: RouterAdapterRegistry = .builtIn) -> RouterDescriptor? {
+        let adapter = adapterID.flatMap { registry.adapter(id: $0) } ?? (adapterID == nil ? registry.matching(model: model) : nil)
+        guard let adapter = adapter, adapter.matches(model: model) else { return nil }
+        return adapter.descriptor
+    }
 }
 
-enum F50ModuleState: String {
-    case hidden, loading, ready, unavailable
+struct RouterNetworkRecord: Codable, Equatable {
+    let adapterID: String
+    let name: String
+    let model: String
 }
 
-/// 请求和当前网络绑定；取消、切网或新请求发生后，旧响应不能覆盖快照。
+enum RouterModuleState: String { case hidden, loading, ready, unavailable }
+
+/// 请求、模块证明和当前网络绑定；迟到响应不能跨网络或跨模块覆盖状态。
 struct RouterState {
+    let registry: RouterAdapterRegistry
     private var serial: UInt64 = 0
     private(set) var pending: RouterRequest?
     private(set) var info: RouterInfo?
@@ -29,12 +39,13 @@ struct RouterState {
     private(set) var errorMessage: String?
     private var responseNetwork: NetworkContext?
     private var identifiedNetwork: NetworkContext?
-    private var identifiedModel: String?
+    private var identifiedAdapter: RouterDescriptor?
 
+    init(registry: RouterAdapterRegistry = .builtIn) { self.registry = registry }
     mutating func invalidate() {
         serial &+= 1
         pending = nil; info = nil; updatedAt = nil; errorMessage = nil
-        responseNetwork = nil; identifiedNetwork = nil; identifiedModel = nil
+        responseNetwork = nil; identifiedNetwork = nil; identifiedAdapter = nil
     }
     mutating func begin(network: NetworkContext, gateway: String) -> RouterRequest {
         serial &+= 1
@@ -43,29 +54,32 @@ struct RouterState {
         return request
     }
     @discardableResult
-    mutating func accept(_ response: RouterInfo, request: RouterRequest,
-                         current: NetworkContext?, date: Date) -> Bool {
+    mutating func accept(_ response: RouterInfo, request: RouterRequest, current: NetworkContext?, date: Date) -> Bool {
         guard pending == request, current == request.network else { return false }
-        pending = nil
-        responseNetwork = request.network
+        pending = nil; responseNetwork = request.network
         errorMessage = request.targetsCurrentGateway ? response.errorMessage : "管理地址未确认为当前网关，请使用 auto 或当前网关 IP"
-        if request.targetsCurrentGateway, response.responded, !response.model.isEmpty {
-            identifiedNetwork = request.network
-            identifiedModel = response.model
+        var checked = response
+        checked.adapter = registry.descriptor(for: response)
+        if request.targetsCurrentGateway, checked.responded, !checked.model.isEmpty {
+            identifiedNetwork = request.network; identifiedAdapter = checked.adapter
         }
-        // 请求失败不保留之前成功的额度数字，避免把旧读数当成实时值。
-        info = request.targetsCurrentGateway && response.responded ? response : nil
+        info = request.targetsCurrentGateway && checked.responded ? checked : nil
         updatedAt = info != nil ? date : nil
         return true
     }
-
-    func moduleState(current: NetworkContext?, knownDevice: ConfirmedDevice?) -> F50ModuleState {
-        guard let current = current, current.hasIPv4Gateway else { return .hidden }
-        // 当前响应中的真实型号优先；用户网络名称和旧网络快照不能决定板块显示。
-        let model = identifiedNetwork == current ? identifiedModel
-            : (!current.gatewayMAC.isEmpty && knownDevice?.gatewayMAC == current.gatewayMAC ? knownDevice?.model : nil)
-        guard let model = model, RouterInfo.isF50ProModel(model) else { return .hidden }
-        if responseNetwork == current, info?.isF50Pro == true { return .ready }
+    func descriptor(current: NetworkContext?, knownDevice: ConfirmedDevice?, selection: String = "auto") -> RouterDescriptor? {
+        guard selection != "none", let current = current, current.hasIPv4Gateway else { return nil }
+        let descriptor: RouterDescriptor?
+        if identifiedNetwork == current { descriptor = identifiedAdapter }
+        else if !current.gatewayMAC.isEmpty && knownDevice?.gatewayMAC == current.gatewayMAC {
+            descriptor = knownDevice?.descriptor(in: registry)
+        } else { descriptor = nil }
+        guard let descriptor = descriptor, selection == "auto" || selection == descriptor.id else { return nil }
+        return descriptor
+    }
+    func moduleState(current: NetworkContext?, knownDevice: ConfirmedDevice?, selection: String = "auto") -> RouterModuleState {
+        guard let descriptor = descriptor(current: current, knownDevice: knownDevice, selection: selection) else { return .hidden }
+        if responseNetwork == current, info?.adapter?.id == descriptor.id { return .ready }
         if pending?.network == current { return .loading }
         return .unavailable
     }

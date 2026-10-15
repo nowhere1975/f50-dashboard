@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var router = RouterState()
     private let store = StateStore()
     private let networkObserver = NetworkObserver()
-    private var routerTask: URLSessionDataTask?
+    private var routerTask: RouterFetchTask?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var signals: [DispatchSourceSignal] = []
     private var instanceFD: Int32 = -1
@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         statusItem.button?.title = "↓  --- ↑  ---"
-        statusItem.button?.toolTip = "F50 Dashboard \(appVersion)"
+        statusItem.button?.toolTip = "Traffic Monitor \(appVersion)"
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem.menu = menu
@@ -159,12 +159,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func refreshRouter(force: Bool = false) {
         guard let context = tracker.context else { return }
+        guard config.routerAdapter != "none" else { invalidateRouter(); rebuildIfOpen(); return }
         guard context.hasIPv4Gateway else { invalidateRouter(); rebuildIfOpen(); return }
         if force { routerTask?.cancel() }
         else if router.pending != nil { return }
         let gateway = config.routerGateway == "auto" ? context.gateway : config.routerGateway
         let request = router.begin(network: context, gateway: gateway)
-        routerTask = RouterClient.fetch(gateway: gateway) { [weak self] info in
+        routerTask = RouterClient.fetch(gateway: gateway, selection: config.routerAdapter,
+            preferred: tracker.state.devices[context.key]?.descriptor()?.id) { [weak self] info in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 let actual = SysInfo.networkContext(interface: self.config.interface)
@@ -174,10 +176,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 if request.targetsCurrentGateway {
                     self.tracker.rememberDevice(info, key: request.network.key, date: Date())
                 }
-                if info.isF50Pro && request.targetsCurrentGateway {
-                    self.tracker.setLabel("F50 Pro", for: request.network.key)
+                if info.isSupported && request.targetsCurrentGateway {
+                    self.tracker.setLabel(info.adapter!.name, for: request.network.key)
                     self.mergeLegacyF50IfPossible()
-                    if self.configWarning == nil {
+                    if info.canCountTraffic && self.configWarning == nil {
                         do {
                             try self.tracker.sampleBilling(info, key: request.network.key, config: self.config, date: Date())
                             self.billingWarning = nil
@@ -193,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func applyConfig(_ next: Config) {
         let old = config
         config = next; configWarning = nil
-        if old.interface != next.interface || old.routerGateway != next.routerGateway {
+        if old.interface != next.interface || old.routerGateway != next.routerGateway || old.routerAdapter != next.routerAdapter {
             sampleGeneration &+= 1
             invalidateRouter()
             tracker.resetBaseline()
@@ -315,17 +317,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             "networkKey": tracker.context?.key ?? "", "interface": tracker.context?.interface ?? "",
             "localPollSec": config.localPollSec, "routerPollSec": config.routerPollSec,
             "routerModel": router.info?.model ?? "",
-            "routerUsageValid": router.info?.isF50Pro == true && router.info?.monthlyTotal != nil,
+            "routerUsageValid": router.info?.canCountTraffic == true,
             "lastSavedAt": lastSavedAt?.timeIntervalSince1970 ?? 0,
             "billingCycleDay": config.billingCycleDay ?? 0, "billingTimeZone": config.billingTimeZone,
             "warnings": [configWarning, stateWarning, saveWarning, notificationWarning, billingWarning].compactMap { $0 }
         ]
         let module = router.moduleState(current: tracker.context,
-            knownDevice: tracker.context.flatMap { tracker.state.devices[$0.key] })
-        status["f50ModuleState"] = module.rawValue
-        status["f50ModuleVisible"] = module != .hidden
+            knownDevice: tracker.context.flatMap { tracker.state.devices[$0.key] }, selection: config.routerAdapter)
+        status["routerModuleID"] = router.descriptor(current: tracker.context,
+            knownDevice: tracker.context.flatMap { tracker.state.devices[$0.key] }, selection: config.routerAdapter)?.id ?? ""
+        status["routerModuleState"] = module.rawValue
+        status["routerModuleVisible"] = module != .hidden
         status["menuTitles"] = menuEntries().filter { !$0.isSeparator }.map(\.title)
-        if let total = router.info?.monthlyTotal { status["routerCounterBytes"] = total }
+        if let total = router.info?.counterTotal { status["routerCounterBytes"] = total }
         if let key = tracker.context?.key, let usage = tracker.billingUsage(key: key, config: config, date: Date()) {
             status["billingPeriod"] = usage.period.label
             status["billingRecordedBytes"] = usage.total
@@ -353,7 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
               let previous = tracker.billingUsage(key: key, config: config, date: now),
               let threshold = tracker.billingQuotaAlert(key: key, config: config, date: now) else { return }
         let content = UNMutableNotificationContent()
-        content.title = "F50 用量达到配置额度的 \(threshold)%"
+        content.title = "套餐用量达到配置额度的 \(threshold)%"
         content.body = "\(previous.period.label)，月度估算用量 \(Fmt.bytes(previous.total))，套餐额度 \(Fmt.trim(config.quotaGB)) GB。实际余量请查询运营商。"
         content.sound = .default
         let submitted = tracker.state.billing[key]?[previous.period.key]?.notified
@@ -388,10 +392,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                       context.key == settingsNetwork,
                       SysInfo.networkContext(interface: self.config.interface) == context,
                       self.config.interface == next.interface, self.config.routerGateway == next.routerGateway,
-                      let info = self.router.info, info.isF50Pro, let sampledAt = self.router.updatedAt,
+                      self.config.routerAdapter == next.routerAdapter,
+                      let info = self.router.info, info.canCountTraffic, let sampledAt = self.router.updatedAt,
                       now.timeIntervalSince(sampledAt) >= 0,
                       now.timeIntervalSince(sampledAt) <= min(60, max(10, self.config.routerPollSec * 2)) else {
-                    throw ConfigError(message: "请连接 F50 并刷新设备读数，再填写运营商当前已用量；网卡或管理地址请另行保存")
+                    throw ConfigError(message: "请连接支持流量统计的路由器并刷新读数，再填写运营商当前已用量；网卡或管理地址请另行保存")
                 }
                 try candidate.sampleBilling(info, key: context.key, config: next, date: now, calibratedGB: usedGB)
             }

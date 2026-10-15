@@ -9,8 +9,8 @@ var tracker = TrafficTracker()
 tracker.sample(context: pro, counters: InterfaceCounters(rx: 1000, tx: 100), uptime: 0, date: now, maxGap: 30)
 tracker.setLabel("F50 Pro", for: pro.key)
 var info = RouterInfo()
-info.responded = true; info.model = "F50ProV1.0.0B27"; info.firmware = "MU3356V1.0.0B27"
-info.monthlyRx = 28_000_000; info.monthlyTx = 27_000_000; info.usedFields = "fixture"
+info.adapter = F50ProAdapter().descriptor; info.responded = true; info.model = "F50ProV1.0.0B27"; info.firmware = "MU3356V1.0.0B27"
+info.counterRx = 28_000_000; info.counterTx = 27_000_000; info.counterSource = "fixture"
 info.netType = "LTE"; info.sigBar = "5"; info.rsrp = "-92"; info.wanIP = "10.2.3.4"
 info.hasStationList = true; info.stations = [(mac: "aa:bb:cc:dd:ee:ff", ip: "192.168.0.101")]
 tracker.rememberDevice(info, key: pro.key, date: now)
@@ -60,7 +60,7 @@ for index in 1...100 {
     let date = now.addingTimeInterval(Double(index * 2))
     tracker.sample(context: pro, counters: InterfaceCounters(rx: UInt64(1000 + index * 1_000_000), tx: UInt64(100 + index * 10_000)),
                    uptime: Double(index * 2), date: date, maxGap: 30)
-    info.monthlyRx! += 1_000_000
+    info.counterRx! += 1_000_000
     try tracker.sampleBilling(info, key: pro.key, config: config, date: date)
     let request = router.begin(network: pro, gateway: pro.gateway)
     router.accept(info, request: request, current: pro, date: date)

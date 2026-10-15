@@ -3,6 +3,7 @@ import Foundation
 struct Config: Codable, Equatable {
     var quotaGB: Double = 100
     var routerGateway = "auto"
+    var routerAdapter = "auto"
     var interface = "auto"
     var localPollSec: Double = 2
     var routerPollSec: Double = 30
@@ -21,12 +22,13 @@ struct Config: Codable, Equatable {
 
     init() {}
     private enum CodingKeys: String, CodingKey {
-        case quotaGB, routerGateway, interface, localPollSec, routerPollSec, showRateInTitle
+        case quotaGB, routerGateway, routerAdapter, interface, localPollSec, routerPollSec, showRateInTitle
         case networkNames, enableQuotaAlerts, billingCycleDay, billingTimeZone
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         quotaGB = try c.decodeIfPresent(Double.self, forKey: .quotaGB) ?? 100
+        routerAdapter = try c.decodeIfPresent(String.self, forKey: .routerAdapter) ?? "auto"
         routerGateway = try c.decodeIfPresent(String.self, forKey: .routerGateway) ?? "auto"
         interface = try c.decodeIfPresent(String.self, forKey: .interface) ?? "auto"
         localPollSec = try c.decodeIfPresent(Double.self, forKey: .localPollSec) ?? 2
@@ -48,9 +50,10 @@ struct Config: Codable, Equatable {
         try require(TimeZone(identifier: billingTimeZone) != nil, "套餐时区无效")
         try require(localPollSec.isFinite && (1...60).contains(localPollSec), "localPollSec 必须为 1–60 秒")
         try require(routerPollSec.isFinite && (5...3600).contains(routerPollSec), "routerPollSec 必须为 5–3600 秒")
+        try require(routerAdapter == "auto" || routerAdapter == "none" || RouterAdapterRegistry.builtIn.adapter(id: routerAdapter) != nil, "路由器模块不可用，请选择自动识别或已安装模块")
         try require(interface == "auto" || (!interface.isEmpty && interface.utf8.count < 16
             && interface.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }), "interface 必须为 auto 或有效网卡名称")
-        try require(routerGateway == "auto" || RouterClient.url(gateway: routerGateway) != nil,
+        try require(routerGateway == "auto" || RouterAddress.components(routerGateway) != nil,
                     "routerGateway 必须为 auto、IP 地址或主机名（可带端口）")
     }
 

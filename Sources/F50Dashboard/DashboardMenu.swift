@@ -37,20 +37,26 @@ enum DashboardMenu {
         } else { add("当前网络      等待系统网络信息") }
 
         let knownDevice = tracker.context.flatMap { tracker.state.devices[$0.key] }
-        let phase = router.moduleState(current: tracker.context, knownDevice: knownDevice)
+        let phase = router.moduleState(current: tracker.context, knownDevice: knownDevice, selection: config.routerAdapter)
         if phase != .hidden {
             rows.append(.separator)
-            add("F50 Pro")
+            let descriptor = router.descriptor(current: tracker.context, knownDevice: knownDevice, selection: config.routerAdapter)
+            add(descriptor?.name ?? "路由器")
             switch phase {
             case .ready:
                 if let info = router.info {
-                    rows += billingEntries(tracker: tracker, info: info, config: config, date: date,
-                                           configWarning: configWarning)
-                    var signal = "移动网络      \(info.netType.isEmpty ? "未知" : info.netType)"
-                    if !info.sigBar.isEmpty { signal += " · \(info.sigBar)/5" }
-                    if !info.rsrp.isEmpty { signal += " · \(info.rsrp) dBm" }
-                    add(signal)
-                    add(info.hasStationList ? "接入设备      \(info.stations.count) 台" : "接入设备      暂未取得有效读数")
+                    if descriptor?.capabilities.contains(.traffic) == true {
+                        rows += billingEntries(tracker: tracker, info: info, config: config, date: date, configWarning: configWarning)
+                    }
+                    if descriptor?.capabilities.contains(.signal) == true {
+                        var signal = "移动网络      \(info.netType.isEmpty ? "未知" : info.netType)"
+                        if !info.sigBar.isEmpty { signal += " · \(info.sigBar)/5" }
+                        if !info.rsrp.isEmpty { signal += " · \(info.rsrp) dBm" }
+                        add(signal)
+                    }
+                    if descriptor?.capabilities.contains(.clients) == true {
+                        add(info.hasStationList ? "接入设备      \(info.stations.count) 台" : "接入设备      暂未取得有效读数")
+                    }
                     if let updated = router.updatedAt {
                         add("更新于        \(DateFormatter.localizedString(from: updated, dateStyle: .none, timeStyle: .medium))（\(Int(max(0, date.timeIntervalSince(updated)))) 秒前）")
                     }
@@ -88,7 +94,7 @@ enum DashboardMenu {
         }
         let period = BillingPeriod.containing(date, resetDay: day, timeZoneID: config.billingTimeZone)
         rows.append(MenuEntry("  套餐周期    \(period.label)"))
-        guard info.monthlyTotal != nil else {
+        guard info.counterTotal != nil else {
             rows.append(MenuEntry("  设备用量暂不可用，等待下次刷新"))
             return rows
         }
@@ -112,15 +118,16 @@ enum DashboardMenu {
     }
 
     private static func deviceDetails(tracker: TrafficTracker, router: RouterState,
-                                       phase: F50ModuleState, knownDevice: ConfirmedDevice?) -> [MenuEntry] {
+                                       phase: RouterModuleState, knownDevice: ConfirmedDevice?) -> [MenuEntry] {
         var rows: [MenuEntry] = []
         let info = phase == .ready ? router.info : nil
         if let info = info {
+            if let adapter = info.adapter { rows.append(MenuEntry("路由器模块    \(adapter.name)", id: "device.adapter")) }
             rows += [MenuEntry("型号          \(info.model)", id: "device.model"), MenuEntry("固件          \(info.firmware)")]
-            if let total = info.monthlyTotal {
+            if let total = info.counterTotal {
                 rows += [.separator, MenuEntry("设备原始统计  \(Fmt.bytes(total))"),
-                         MenuEntry("  下载/上传   \(Fmt.bytes(info.monthlyRx!)) / \(Fmt.bytes(info.monthlyTx!))"),
-                         MenuEntry("  字段        \(info.usedFields)"),
+                         MenuEntry("  下载/上传   \(Fmt.bytes(info.counterRx!)) / \(Fmt.bytes(info.counterTx!))"),
+                         MenuEntry("  字段        \(info.counterSource)"),
                          MenuEntry("设备原始统计不代表完整套餐月度用量")]
             }
             if !info.wanIP.isEmpty { rows.append(MenuEntry("WAN IP        \(info.wanIP)")) }

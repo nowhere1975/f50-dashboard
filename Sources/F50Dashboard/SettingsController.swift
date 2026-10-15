@@ -10,6 +10,7 @@ final class SettingsController: NSWindowController {
     private let localPoll = NSTextField()
     private let routerPoll = NSTextField()
     private let gateway = NSTextField()
+    private let adapter = NSPopUpButton()
     private let interface = NSTextField()
     private let networkName = NSTextField()
     private let rates = NSButton(checkboxWithTitle: "菜单栏显示实时速率", target: nil, action: nil)
@@ -20,7 +21,7 @@ final class SettingsController: NSWindowController {
         self.config = config; self.networkKey = networkKey; self.onSave = onSave
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "F50 Dashboard 设置"
+        window.title = "Traffic Monitor 设置"
         window.isReleasedWhenClosed = false
         super.init(window: window)
         quota.stringValue = Fmt.trim(config.quotaGB)
@@ -29,6 +30,11 @@ final class SettingsController: NSWindowController {
         carrierUsed.placeholderString = "可留空；填写运营商当前已用量"
         localPoll.stringValue = Fmt.trim(config.localPollSec)
         routerPoll.stringValue = Fmt.trim(config.routerPollSec)
+        for (id, title) in [("auto", "自动识别"), ("none", "不读取路由器")]
+            + RouterAdapterRegistry.builtIn.adapters.map({ ($0.descriptor.id, $0.descriptor.name) }) {
+            adapter.addItem(withTitle: title); adapter.lastItem?.representedObject = id
+            if config.routerAdapter == id { adapter.select(adapter.lastItem) }
+        }
         gateway.stringValue = config.routerGateway
         interface.stringValue = config.interface
         networkName.stringValue = networkKey.flatMap { config.networkNames[$0] } ?? ""
@@ -41,6 +47,7 @@ final class SettingsController: NSWindowController {
             [NSTextField(labelWithString: "运营商本周期已用（GB）"), carrierUsed],
             [NSTextField(labelWithString: "本机刷新（1–60 秒）"), localPoll],
             [NSTextField(labelWithString: "路由器刷新（5–3600 秒）"), routerPoll],
+            [NSTextField(labelWithString: "路由器模块"), adapter],
             [NSTextField(labelWithString: "管理地址"), gateway],
             [NSTextField(labelWithString: "网卡"), interface],
             [NSTextField(labelWithString: "当前网络名称"), networkName]
@@ -84,6 +91,7 @@ final class SettingsController: NSWindowController {
         }
         next.billingCycleDay = dayText.isEmpty ? nil : Int(dayText)
         let used = usedText.isEmpty ? nil : Double(usedText)
+        next.routerAdapter = adapter.selectedItem?.representedObject as? String ?? "auto"
         next.routerGateway = gateway.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         next.interface = interface.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         next.showRateInTitle = rates.state == .on

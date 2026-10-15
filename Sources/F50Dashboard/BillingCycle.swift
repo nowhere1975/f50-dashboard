@@ -46,6 +46,7 @@ struct BillingUsage: Codable {
     var lastRx: UInt64
     var lastTx: UInt64
     var fields: String
+    var adapterID: String? = nil
     var hasGap = false
     var counterResets = 0
     var notified: [Int] = []

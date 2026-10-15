@@ -8,27 +8,27 @@ func expect(_ condition: @autoclosure () throws -> Bool, _ name: String) {
 func rejects(_ json: String) -> Bool {
     (try? JSONDecoder().decode(Config.self, from: Data(json.utf8))) == nil
 }
-func parse(_ json: String) -> RouterInfo { RouterClient.parse(Data(json.utf8)) }
+func parse(_ json: String) -> RouterInfo { RouterAdapterRegistry.builtIn.decode(Data(json.utf8), using: F50ProAdapter()) }
 let temp = FileManager.default.temporaryDirectory.appendingPathComponent("f50-tests-\(UUID().uuidString)")
 try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: temp) }
 
 let valid = parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":123,"flux_monthly_rx_bytes":"456"}"#)
-expect(valid.isF50 && valid.monthlyTotal == 579, "numeric and string counters")
+expect(valid.isSupported && valid.counterTotal == 579, "numeric and string counters")
 let zero = parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":0,"flux_monthly_rx_bytes":0}"#)
-expect(zero.isF50 && zero.monthlyTotal == 0 && !zero.usedFields.isEmpty, "zero is valid")
+expect(zero.isSupported && zero.counterTotal == 0 && !zero.counterSource.isEmpty, "zero is valid")
 let primary = parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":0,"monthly_tx_bytes":999,"flux_monthly_rx_bytes":0}"#)
-expect(primary.monthlyTotal == 0, "primary zero does not fall through")
-expect(parse(#"{"wa_inner_version":"F50ProV1","station_list":[]}"#).monthlyTotal == nil, "missing fields are unknown")
-expect(parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":123}"#).monthlyTotal == nil, "partial counters are unknown")
-expect(!parse(#"{"wa_inner_version":"MF79","station_list":[]}"#).isF50, "other ZTE model rejected")
-expect(parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":true,"flux_monthly_rx_bytes":0}"#).monthlyTotal == nil, "boolean rejected")
-expect(parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":-1,"flux_monthly_rx_bytes":0}"#).monthlyTotal == nil, "negative rejected")
-expect(parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":"18446744073709551615","flux_monthly_rx_bytes":1}"#).monthlyTotal == nil, "sum overflow rejected")
+expect(primary.counterTotal == 0, "primary zero does not fall through")
+expect(parse(#"{"wa_inner_version":"F50ProV1","station_list":[]}"#).counterTotal == nil, "missing fields are unknown")
+expect(parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":123}"#).counterTotal == nil, "partial counters are unknown")
+expect(!parse(#"{"wa_inner_version":"MF79","station_list":[]}"#).isSupported, "other ZTE model rejected")
+expect(parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":true,"flux_monthly_rx_bytes":0}"#).counterTotal == nil, "boolean rejected")
+expect(parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":-1,"flux_monthly_rx_bytes":0}"#).counterTotal == nil, "negative rejected")
+expect(parse(#"{"wa_inner_version":"F50ProV1","flux_monthly_tx_bytes":"18446744073709551615","flux_monthly_rx_bytes":1}"#).counterTotal == nil, "sum overflow rejected")
 expect(!parse("<html>404</html>").responded, "invalid response rejected")
-expect(RouterClient.url(gateway: "192.168.0.1") != nil, "IPv4 URL")
-expect(RouterClient.url(gateway: "[::1]:8080") != nil, "IPv6 URL")
-expect(RouterClient.url(gateway: "host/path") == nil && RouterClient.url(gateway: "user@host") == nil, "invalid management address")
+expect(RouterAddress.components("192.168.0.1") != nil, "IPv4 URL")
+expect(RouterAddress.components("[::1]:8080") != nil, "IPv6 URL")
+expect(RouterAddress.components("host/path") == nil && RouterAddress.components("user@host") == nil, "invalid management address")
 expect(rejects(#"{"quotaGB":0}"#), "zero quota rejected")
 expect(rejects(#"{"quotaGB":-100}"#), "negative quota rejected")
 expect(rejects(#"{"localPollSec":0}"#), "zero interval rejected")
@@ -186,8 +186,8 @@ expect(parse(#"{"wa_inner_version":"F50ProV1","flux_auto_clear_flow_data_switch"
 expect(parse(#"{"wa_inner_version":"F50ProV1","flux_auto_clear_flow_data_switch":"off","flux_clear_date":"1"}"#).autoClearDay == nil, "disabled reset not shown as active")
 
 func reading(_ rx: UInt64, _ tx: UInt64, fields: String = "same-fields") -> RouterInfo {
-    var info = RouterInfo(); info.responded = true; info.model = "F50ProV1"
-    info.monthlyRx = rx; info.monthlyTx = tx; info.usedFields = fields
+    var info = RouterInfo(); info.adapter = F50ProAdapter().descriptor; info.responded = true; info.model = "F50ProV1"
+    info.counterRx = rx; info.counterTx = tx; info.counterSource = fields
     return info
 }
 var monthly = TrafficTracker()
@@ -277,8 +277,8 @@ corruptRecord["period"] = corruptPeriod; corruptDevice[actualUsage.period.key] =
 corruptRecords[f50.key] = corruptDevice; corruptBilling["billing"] = corruptRecords
 expect((try? JSONDecoder().decode(PersistedState.self, from: JSONSerialization.data(withJSONObject: corruptBilling))) == nil,
        "corrupt billing timezone rejected before period rendering")
-expect(valid.isF50Pro && RouterInfo.isF50ProModel("F50 Pro V1"), "F50 Pro model variants recognized")
-expect(!RouterInfo.isF50ProModel("F50V1") && !RouterInfo.isF50ProModel("MF79"), "other router models cannot open Pro module")
+expect(valid.isSupported && F50ProAdapter().matches(model: "F50 Pro V1"), "F50 Pro model variants recognized")
+expect(!F50ProAdapter().matches(model: "F50V1") && !F50ProAdapter().matches(model: "MF79"), "other router models cannot open Pro module")
 expect(parse(#"{"wa_inner_version":"F50ProV1","station_list":[]}"#).hasStationList,
        "explicit empty client list is valid")
 expect(!valid.hasStationList, "missing client list is unknown rather than zero")
@@ -370,7 +370,7 @@ _ = wrongTarget.accept(uiInfo, request: wrongProbe, current: home, date: october
 expect(wrongTarget.info == nil && wrongTarget.moduleState(current: home, knownDevice: nil) == .hidden, "reachable Pro elsewhere cannot label current home router")
 expect(RouterRequest(serial: 1, network: f50, gateway: f50.gateway + ":8080").targetsCurrentGateway, "current gateway IP with custom port remains valid")
 
-var missingCounts = uiInfo; missingCounts.monthlyRx = nil; missingCounts.hasStationList = false
+var missingCounts = uiInfo; missingCounts.counterRx = nil; missingCounts.hasStationList = false
 uiTracker.sample(context: f50, counters: InterfaceCounters(rx: 6000, tx: 600), uptime: 4, date: october, maxGap: 30)
 var partialRouter = RouterState()
 let partialProbe = partialRouter.begin(network: f50, gateway: f50.gateway)

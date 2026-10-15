@@ -1,11 +1,11 @@
 import Cocoa
 
-let appVersion = "0.7.1"
+let appVersion = "0.8.0"
 
 func printCheck() -> Bool {
     let loaded = Config.read()
     let config = loaded.config
-    print("── F50 Dashboard \(appVersion) ──")
+    print("── Traffic Monitor \(appVersion) ──")
     print("  配置文件    \(Config.fileURL.path)")
     if let warning = loaded.warning { print("  提示        \(warning)") }
     print("  月度套餐    \(Fmt.trim(config.quotaGB)) GB")
@@ -29,18 +29,22 @@ func printCheck() -> Bool {
         localOK = true
     } else { print("  网卡计数    读取失败或计数重置") }
     print("── 路由器（只读）──")
+    if config.routerAdapter == "none" { print("  状态        路由器读取已关闭"); return localOK && loaded.warning == nil }
     guard context.hasIPv4Gateway else { print("  状态        当前无 IPv4 网关"); return false }
     let gateway = config.routerGateway == "auto" ? context.gateway : config.routerGateway
     let sem = DispatchSemaphore(value: 0)
     var response = RouterInfo()
-    let task = RouterClient.fetch(gateway: gateway) { response = $0; sem.signal() }
+    let task = RouterClient.fetch(gateway: gateway, selection: config.routerAdapter) { response = $0; sem.signal() }
     guard sem.wait(timeout: .now() + 8) == .success else {
-        task?.cancel(); print("  状态        请求超时"); return false
+        task.cancel(); print("  状态        请求超时"); return false
     }
+    print("  路由器模块  \(response.adapter?.name ?? "未识别")")
     print("  型号 / 固件 \(response.model) / \(response.firmware)")
     if let error = response.errorMessage { print("  提示        \(error)") }
-    if response.isF50, let total = response.monthlyTotal {
-        print("  命中字段    \(response.usedFields)")
+    guard response.isSupported else { return false }
+    if response.adapter?.capabilities.contains(.traffic) == true {
+        guard let total = response.counterTotal else { return false }
+        print("  命中字段    \(response.counterSource)")
         print("  设备计数    \(Fmt.bytes(total))（可在套餐周期内清零）")
         if let day = response.autoClearDay { print("  自动清零    设备设置每月 \(day) 日") }
         var tracker = TrafficTracker()
@@ -56,24 +60,32 @@ func printCheck() -> Bool {
                 } else { print("  月度估算    暂不可用，请补齐初始用量或重新校准") }
             }
         }
-        print("  原始字节    \(total)（下载 \(response.monthlyRx!) + 上传 \(response.monthlyTx!)）")
-        print("  移动网络    \(response.netType) · \(response.sigBar)/5 · \(response.rsrp) dBm")
-        print("  接入设备    \(response.stations.count) 台")
+        print("  原始字节    \(total)（下载 \(response.counterRx!) + 上传 \(response.counterTx!)）")
         print("  说明        套餐余量以运营商查询结果为准")
-        return localOK && loaded.warning == nil
     }
-    return false
+    if response.adapter?.capabilities.contains(.signal) == true {
+        print("  移动网络    \(response.netType) · \(response.sigBar)/5 · \(response.rsrp) dBm")
+    }
+    if response.adapter?.capabilities.contains(.clients) == true {
+        print("  接入设备    \(response.hasStationList ? "\(response.stations.count) 台" : "未知")")
+    }
+    return localOK && loaded.warning == nil
 }
 
 let args = CommandLine.arguments
-if args.contains("--version") { print("f50-dashboard \(appVersion)"); exit(0) }
+if args.contains("--version") { print("Traffic Monitor \(appVersion)"); exit(0) }
+if args.contains("--adapters") {
+    for adapter in RouterAdapterRegistry.builtIn.adapters { print("\(adapter.descriptor.id)  \(adapter.descriptor.name)") }
+    exit(0)
+}
 if args.contains("--help") || args.contains("-h") {
     print("""
-    f50-dashboard —— F50 Pro 菜单栏流量看板
+    Traffic Monitor —— 本机与路由器流量看板
 
       F50Dashboard              启动菜单栏看板
       F50Dashboard --check      诊断本机采样与路由器接口（失败返回非零）
       F50Dashboard --version    显示版本
+      F50Dashboard --adapters   列出内置路由器模块
 
     配置与数据：~/Library/Application Support/F50Dashboard/
     """)

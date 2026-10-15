@@ -41,7 +41,7 @@ struct DashboardCard: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                Text("F50 Dashboard").font(.system(size: 16, weight: .semibold))
+                Text("Traffic Monitor").font(.system(size: 16, weight: .semibold))
                 Spacer()
                 Text(version).font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             }.padding(.horizontal, 18).padding(.vertical, 10)
@@ -103,38 +103,40 @@ struct DashboardCard: View {
 
     private var quota: some View {
         VStack(alignment: .leading, spacing: 7) {
-            sectionTitle("SIM 卡月度套餐", caption: "估算")
-            HStack(alignment: .bottom) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("剩余").font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor))
-                    HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        Text(data.remainingGB.map { String(format: "%.2f", $0) } ?? "—")
-                            .font(.system(size: 26, weight: .semibold)).monospacedDigit()
-                        Text("GB").font(.system(size: 13))
+            if data.supportsTraffic {
+                sectionTitle("SIM 卡月度套餐", caption: "估算")
+                HStack(alignment: .bottom) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("剩余").font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            Text(data.remainingGB.map { String(format: "%.2f", $0) } ?? "—")
+                                .font(.system(size: 26, weight: .semibold)).monospacedDigit()
+                            Text("GB").font(.system(size: 13))
+                        }
                     }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(data.remainingPercent.map { String(format: "%.2f%%", $0) } ?? "—")
+                            .font(.system(size: 16, weight: .medium)).monospacedDigit()
+                        Text("剩余占比").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+                    }.padding(.bottom, 3)
                 }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(data.remainingPercent.map { String(format: "%.2f%%", $0) } ?? "—")
-                        .font(.system(size: 16, weight: .medium)).monospacedDigit()
-                    Text("剩余占比").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
-                }.padding(.bottom, 3)
-            }
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.08))
-                    RoundedRectangle(cornerRadius: 4).fill(accent)
-                        .frame(width: proxy.size.width * (data.remainingPercent ?? 0) / 100)
-                }
-            }.frame(height: 8)
-                .accessibilityLabel(data.remainingPercent.map { "月度套餐剩余 \(String(format: "%.2f", $0))%" } ?? "套餐余量暂不可用")
-            HStack(alignment: .top) {
-                Text(data.usedBytes.map { "本月用量 \(Fmt.bytes($0)) / \(Fmt.trim(data.quotaGB)) GB" }
-                    ?? "套餐 \(Fmt.trim(data.quotaGB)) GB（手动设置）")
-                Spacer(minLength: 5)
-                Text(data.reset).foregroundColor(Color(nsColor: .secondaryLabelColor))
-            }.font(.system(size: 12))
-            if !data.signal.isEmpty {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.08))
+                        RoundedRectangle(cornerRadius: 4).fill(accent)
+                            .frame(width: proxy.size.width * (data.remainingPercent ?? 0) / 100)
+                    }
+                }.frame(height: 8)
+                    .accessibilityLabel(data.remainingPercent.map { "月度套餐剩余 \(String(format: "%.2f", $0))%" } ?? "套餐余量暂不可用")
+                HStack(alignment: .top) {
+                    Text(data.usedBytes.map { "本月用量 \(Fmt.bytes($0)) / \(Fmt.trim(data.quotaGB)) GB" }
+                        ?? "套餐 \(Fmt.trim(data.quotaGB)) GB（手动设置）")
+                    Spacer(minLength: 5)
+                    Text(data.reset).foregroundColor(Color(nsColor: .secondaryLabelColor))
+                }.font(.system(size: 12))
+            } else { sectionTitle(data.deviceName, caption: "路由器") }
+            if !data.signal.isEmpty || !data.stationCount.isEmpty {
                 HStack { Text(data.signal); Spacer(); Text(data.stationCount) }.font(.system(size: 12))
             }
         }.padding(.horizontal, 18).padding(.vertical, 10)
@@ -145,7 +147,7 @@ struct DashboardCard: View {
             sectionTitle("本机月度用量", caption: data.monthTitle)
             HStack(spacing: 8) {
                 monthAmount("本月总量", bytes: data.monthTotal)
-                monthAmount("F50 Pro", bytes: data.monthF50Total, color: DashboardPalette.teal)
+                monthAmount(data.routerTrafficLabel, bytes: data.monthRouterTotal, color: DashboardPalette.teal)
                 monthAmount("其他网络", bytes: data.monthOtherTotal)
             }
             VStack(spacing: 4) {
@@ -172,8 +174,8 @@ struct DashboardCard: View {
                     }
                 }.zIndex(1)
             HStack(spacing: 12) {
-                legend("F50 Pro", filled: true, color: DashboardPalette.teal)
-                legend("无 F50 Pro", filled: true, color: Color.primary.opacity(0.12))
+                legend(data.routerTrafficLabel, filled: true, color: DashboardPalette.teal)
+                legend("无路由器用量", filled: true, color: Color.primary.opacity(0.12))
                 legend("未记录", filled: false, color: Color.secondary.opacity(0.4))
             }.font(.system(size: 10)).foregroundColor(Color(nsColor: .secondaryLabelColor))
         }.padding(.horizontal, 18).padding(.vertical, 10)
@@ -189,11 +191,12 @@ struct DashboardCard: View {
 
     private func dayCell(_ day: DashboardSnapshot.Day) -> some View {
         RoundedRectangle(cornerRadius: 4)
-            .fill(day.hasF50 ? DashboardPalette.teal : day.total != nil ? Color.primary.opacity(0.09) : .clear)
+            .fill(day.hasRouterTraffic ? DashboardPalette.teal : day.total != nil ? Color.primary.opacity(0.09) : .clear)
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(
-                state.inspectedDay?.id == day.id ? Color(nsColor: .labelColor).opacity(0.65)
-                    : day.total == nil ? Color.secondary.opacity(day.isFuture ? 0.12 : 0.35) : .clear,
-                lineWidth: state.inspectedDay?.id == day.id ? 1.5 : 1))
+                day.total == nil ? Color.secondary.opacity(day.isFuture ? 0.12 : 0.35) : .clear,
+                lineWidth: 1))
+            .shadow(color: DashboardPalette.teal.opacity(state.hoveredDay?.id == day.id ? 0.5 : day.isToday ? 0.3 : 0),
+                    radius: state.hoveredDay?.id == day.id ? 4 : 3)
             .frame(width: 16.5, height: 16.5)
             .background(ChartTrackingRegion(state: state, dayID: day.id))
             .help(day.detail).accessibilityLabel(day.detail)

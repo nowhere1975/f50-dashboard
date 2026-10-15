@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>              <string>F50Dashboard</string>
-    <key>CFBundleDisplayName</key>       <string>F50 Dashboard</string>
+    <key>CFBundleName</key>              <string>TrafficMonitor</string>
+    <key>CFBundleDisplayName</key>       <string>Traffic Monitor</string>
     <key>CFBundleIdentifier</key>        <string>io.github.nowhere1975.f50dashboard</string>
     <key>CFBundleExecutable</key>        <string>F50Dashboard</string>
     <key>CFBundleVersion</key>           <string>__VERSION__</string>

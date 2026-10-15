@@ -25,10 +25,11 @@ struct PersistedState: Codable {
     var billing: [String: [String: BillingUsage]] = [:]
     var devices: [String: ConfirmedDevice] = [:]
     // 历史归属与当前设备识别分开保存；设备暂不可用或被移除时不改写旧用量的分类。
-    var f50Networks: Set<String> = []
+    var f50Networks: Set<String> = [] // 兼容旧版的历史字段。
+    var routerNetworks: [String: RouterNetworkRecord] = [:]
 
     init() {}
-    private enum CodingKeys: String, CodingKey { case buckets, daily, alerts, billing, devices, f50Networks }
+    private enum CodingKeys: String, CodingKey { case buckets, daily, alerts, billing, devices, f50Networks, routerNetworks }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         buckets = try c.decode([String: Bucket].self, forKey: .buckets)
@@ -37,7 +38,17 @@ struct PersistedState: Codable {
         billing = try c.decodeIfPresent([String: [String: BillingUsage]].self, forKey: .billing) ?? [:]
         devices = try c.decodeIfPresent([String: ConfirmedDevice].self, forKey: .devices) ?? [:]
         f50Networks = try c.decodeIfPresent(Set<String>.self, forKey: .f50Networks) ?? []
-        f50Networks.formUnion(devices.keys)
+        routerNetworks = try c.decodeIfPresent([String: RouterNetworkRecord].self, forKey: .routerNetworks) ?? [:]
+        for (key, device) in devices {
+            if let descriptor = device.descriptor(), routerNetworks[key] == nil {
+                routerNetworks[key] = RouterNetworkRecord(adapterID: descriptor.id, name: descriptor.name, model: device.model)
+            }
+        }
+        // 旧版明确记录为 F50 Pro 的历史归属，即使当前设备证明已移除也要保留。
+        let legacyAdapter = F50ProAdapter().descriptor
+        for key in f50Networks where routerNetworks[key] == nil {
+            routerNetworks[key] = RouterNetworkRecord(adapterID: legacyAdapter.id, name: legacyAdapter.name, model: "")
+        }
         guard f50Networks.allSatisfy({ key in
             key.hasPrefix("mac:") && SysInfo.normalizeMAC(String(key.dropFirst(4))) == String(key.dropFirst(4))
                 && !String(key.dropFirst(4)).isEmpty
@@ -45,7 +56,20 @@ struct PersistedState: Codable {
         for (key, device) in devices {
             guard key.hasPrefix("mac:"), !SysInfo.normalizeMAC(String(key.dropFirst(4))).isEmpty,
                   key == "mac:\(device.gatewayMAC)", SysInfo.normalizeMAC(device.gatewayMAC) == device.gatewayMAC,
-                  RouterInfo.isF50ProModel(device.model) else { throw ConfigError(message: "设备识别记录无效") }
+                  (!device.model.isEmpty && (device.adapterID.map(RouterDescriptor.validID) ?? (device.descriptor() != nil))) else { throw ConfigError(message: "设备识别记录无效") }
+        }
+        for (key, record) in routerNetworks {
+            guard key.hasPrefix("mac:"), !SysInfo.normalizeMAC(String(key.dropFirst(4))).isEmpty,
+                  key == "mac:\(SysInfo.normalizeMAC(String(key.dropFirst(4))))",
+                  RouterDescriptor.validID(record.adapterID), !record.name.isEmpty else {
+                throw ConfigError(message: "历史路由器归属无效")
+            }
+        }
+        for key in Array(billing.keys) {
+            guard let source = routerNetworks[key]?.adapterID else { continue }
+            for period in Array(billing[key]!.keys) where billing[key]![period]!.adapterID == nil {
+                billing[key]![period]!.adapterID = source
+            }
         }
         for records in billing.values {
             for (key, record) in records {
@@ -58,6 +82,7 @@ struct PersistedState: Codable {
                       record.lastSampleAt >= record.period.start, record.lastSampleAt < record.period.end,
                       record.calibratedAt.map({ $0 >= record.period.start && $0 < record.period.end }) ?? true,
                       record.counterResets >= 0, record.counterResets < 1_000_000,
+                      record.adapterID.map(RouterDescriptor.validID) ?? true,
                       !record.lastRx.addingReportingOverflow(record.lastTx).overflow else {
                     throw ConfigError(message: "套餐周期记录无效")
                 }
@@ -100,6 +125,7 @@ struct NetworkContext: Equatable {
 /// 由主线程使用；可通过离线样本验证跨网络、读数失败和重置。
 struct TrafficTracker {
     var state = PersistedState()
+    var registry: RouterAdapterRegistry = .builtIn
     private(set) var context: NetworkContext?
     private(set) var connectedSince = Date()
     private(set) var rateRx: Double = 0
@@ -162,9 +188,10 @@ struct TrafficTracker {
     mutating func rememberDevice(_ info: RouterInfo, key: String, date: Date) {
         guard key.hasPrefix("mac:"), !SysInfo.normalizeMAC(String(key.dropFirst(4))).isEmpty,
               info.responded, !info.model.isEmpty else { return }
-        if info.isF50Pro {
-            state.f50Networks.insert(key)
-            state.devices[key] = ConfirmedDevice(gatewayMAC: String(key.dropFirst(4)), model: info.model, verifiedAt: date)
+        if let descriptor = registry.descriptor(for: info) {
+            state.devices[key] = ConfirmedDevice(gatewayMAC: String(key.dropFirst(4)), model: info.model,
+                verifiedAt: date, adapterID: descriptor.id, displayName: descriptor.name)
+            state.routerNetworks[key] = RouterNetworkRecord(adapterID: descriptor.id, name: descriptor.name, model: info.model)
             dirty = true
         } else if state.devices.removeValue(forKey: key) != nil { dirty = true }
     }
@@ -224,20 +251,26 @@ struct TrafficTracker {
 
     mutating func sampleBilling(_ info: RouterInfo, key: String, config: Config, date: Date,
                                 calibratedGB: Double? = nil) throws {
-        guard let day = config.billingCycleDay, key.hasPrefix("mac:"), info.isF50,
-              info.monthlyTotal != nil, let rx = info.monthlyRx, let tx = info.monthlyTx else {
-            if calibratedGB != nil { throw ConfigError(message: "请设置套餐重置日，并连接可识别的 F50 后校准") }
+        guard let day = config.billingCycleDay, key.hasPrefix("mac:"), let descriptor = registry.descriptor(for: info),
+              config.routerAdapter != "none", config.routerAdapter == "auto" || config.routerAdapter == descriptor.id,
+              descriptor.capabilities.contains(.traffic), info.counterTotal != nil, let rx = info.counterRx, let tx = info.counterTx else {
+            if calibratedGB != nil { throw ConfigError(message: "请设置套餐重置日，并连接支持流量统计的路由器后校准") }
             return
         }
         let period = BillingPeriod.containing(date, resetDay: day, timeZoneID: config.billingTimeZone)
         var usage = state.billing[key]?[period.key] ?? BillingUsage(period: period, observedSince: date,
-            lastSampleAt: date, lastRx: rx, lastTx: tx, fields: info.usedFields)
+            lastSampleAt: date, lastRx: rx, lastTx: tx, fields: info.counterSource)
         if let usedGB = calibratedGB {
-            try usage.calibrate(usedGB: usedGB, rx: rx, tx: tx, fields: info.usedFields, date: date)
+            try usage.calibrate(usedGB: usedGB, rx: rx, tx: tx, fields: info.counterSource, date: date)
+        } else if let previous = usage.adapterID, previous != descriptor.id {
+            // 模块变化不能将不同来源的原始计数相减，保留累计并等待新校准。
+            usage.hasGap = true; usage.lastRx = rx; usage.lastTx = tx
+            usage.lastSampleAt = date; usage.fields = info.counterSource
         } else {
-            try usage.sample(rx: rx, tx: tx, fields: info.usedFields, date: date,
-                             maxGap: max(120, config.routerPollSec * 3))
+            try usage.sample(rx: rx, tx: tx, fields: info.counterSource, date: date,
+                maxGap: descriptor.counterPolicy == .persistent ? .infinity : max(120, config.routerPollSec * 3))
         }
+        usage.adapterID = descriptor.id
         state.billing[key, default: [:]][period.key] = usage
         dirty = true
     }
