@@ -5,9 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private let menuRenderer = MenuRenderer()
-    private lazy var dashboard = DashboardPopover(version: appVersion) { [weak self] action in
-        self?.handleDashboardAction(action)
-    }
+    private lazy var dashboard = DashboardMenuCard(version: appVersion)
     private var localTimer: Timer?
     private var routerTimer: Timer?
     private var saveTimer: Timer?
@@ -53,9 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         statusItem.button?.title = "↓  --- ↑  ---"
         statusItem.button?.toolTip = "F50 Dashboard \(appVersion)"
         menu.delegate = self
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(toggleDashboard(_:))
-        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        menu.autoenablesItems = false
+        statusItem.menu = menu
         networkObserver.onChange = { [weak self] in self?.networkChanged() }
         networkObserver.start()
         let center = NSWorkspace.shared.notificationCenter
@@ -222,7 +219,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
     private func rebuildIfOpen() {
         if menuOpen { rebuild() }
-        if dashboard.isShown { dashboard.update(dashboardSnapshot()) }
     }
 
     private func dashboardSnapshot() -> DashboardSnapshot {
@@ -230,34 +226,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             configWarning: configWarning,
             warnings: [configWarning, stateWarning, saveWarning].compactMap { $0 },
             deviceWarnings: [notificationWarning, billingWarning].compactMap { $0 })
-    }
-
-    @objc private func toggleDashboard(_ sender: NSStatusBarButton) {
-        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
-            dashboard.close()
-            NSMenu.popUpContextMenu(menu, with: event, for: sender)
-            return
-        }
-        if !dashboard.isShown {
-            let loaded = Config.read(fallback: config)
-            if loaded.config != config { applyConfig(loaded.config) }
-            configWarning = loaded.warning
-            tick()
-            dashboard.update(dashboardSnapshot())
-            refreshRouter()
-        }
-        dashboard.toggle(from: sender)
-    }
-
-    private func handleDashboardAction(_ action: MenuEntry.Action) {
-        if action != .refresh { dashboard.close() }
-        switch action {
-        case .settings: openSettings()
-        case .config: openConfig()
-        case .data: openData()
-        case .refresh: doRefresh()
-        case .quit: quit()
-        }
     }
 
     private func item(_ title: String, action: Selector? = nil) -> NSMenuItem {
@@ -289,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func menuItem(_ entry: MenuEntry) -> NSMenuItem {
+        if entry.id == "dashboard.card" { return dashboard.item }
         if entry.isSeparator { return .separator() }
         let selector = entry.action.map { action -> Selector in
             switch action {
@@ -310,8 +279,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func rebuild(allowStructureChanges: Bool? = nil) {
-        menuRenderer.update(menuEntries(), menu: menu,
-            allowStructureChanges: allowStructureChanges ?? !menuOpen, makeItem: menuItem)
+        let allowResize = allowStructureChanges ?? !menuOpen
+        let snapshot = dashboardSnapshot()
+        dashboard.update(snapshot, allowResize: allowResize)
+        var entries = [MenuEntry("", id: "dashboard.card"), .separator]
+        if snapshot.phase != .hidden {
+            var details = snapshot.details
+            if !snapshot.updated.isEmpty { details.append(MenuEntry(snapshot.updated, id: "device.updated")) }
+            entries.append(MenuEntry("详细信息", children: details))
+        }
+        if let history = menuEntries().first(where: { $0.title == "历史用量" }) { entries.append(history) }
+        entries.append(.separator)
+        entries += menuEntries().filter { $0.action != nil }
+        menuRenderer.update(entries, menu: menu, allowStructureChanges: allowResize, makeItem: menuItem)
     }
 
     private func saveState() {
@@ -327,7 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         // 本地运行快照用于排查；不向外发送。
         var status: [String: Any] = [
             "version": appVersion, "pid": ProcessInfo.processInfo.processIdentifier,
-            "dashboardStyle": "compact-card", "dashboardVisible": dashboard.isShown,
+            "dashboardStyle": "native-menu-card", "dashboardVisible": menuOpen,
             "updatedAt": Date().timeIntervalSince1970,
             "networkKey": tracker.context?.key ?? "", "interface": tracker.context?.interface ?? "",
             "localPollSec": config.localPollSec, "routerPollSec": config.routerPollSec,

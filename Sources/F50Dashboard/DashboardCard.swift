@@ -2,18 +2,17 @@ import Cocoa
 import SwiftUI
 
 final class DashboardCardState: ObservableObject {
-    @Published var panelHeight: CGFloat = 740
+    @Published var fixedHeight: CGFloat?
+    @Published var layoutHasDevice = false
+    var chartRect: CGRect = .zero
     @Published private(set) var snapshot = DashboardSnapshot()
     @Published var selectedDay: String?
-    @Published var detailsExpanded = false
-    @Published var historyExpanded = false
 
     func update(_ next: DashboardSnapshot) {
         if next.networkKey != snapshot.networkKey {
-            selectedDay = nil; detailsExpanded = false; historyExpanded = false
+            selectedDay = nil
         }
         if let selected = selectedDay, !next.days.contains(where: { $0.id == selected }) { selectedDay = nil }
-        if next.phase == .hidden { detailsExpanded = false }
         if next != snapshot { snapshot = next }
     }
     var inspectedDay: DashboardSnapshot.Day? {
@@ -33,7 +32,6 @@ private enum DashboardPalette {
 struct DashboardCard: View {
     @ObservedObject var state: DashboardCardState
     let version: String
-    let onAction: (MenuEntry.Action) -> Void
     private var data: DashboardSnapshot { state.snapshot }
     private var accent: Color {
         guard let remaining = data.remainingPercent else { return .secondary }
@@ -45,60 +43,30 @@ struct DashboardCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("F50 Dashboard").font(.system(size: 16, weight: .semibold))
                 Spacer()
-                Text(version).font(.system(size: 11)).foregroundStyle(.secondary)
-            }.padding(.horizontal, 20).padding(.vertical, 15)
+                Text(version).font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+            }.padding(.horizontal, 18).padding(.vertical, 10)
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if !data.warnings.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(Array(data.warnings.enumerated()), id: \.offset) { _, warning in
-                                Label(warning, systemImage: "exclamationmark.triangle").font(.system(size: 12))
-                            }
-                        }.padding(.horizontal, 20).padding(.vertical, 12)
-                        Divider()
-                    }
-                    rates
-                    Divider()
-                    if data.phase != .hidden {
-                        quota
-                        Divider()
-                    }
-                    chart
-                    Divider()
-                    if data.phase != .hidden {
-                        DisclosureGroup("设备详情", isExpanded: $state.detailsExpanded) {
-                            EntryRows(entries: data.details).padding(.top, 10)
-                            if !data.updated.isEmpty {
-                                Text(data.updated).font(.system(size: 11)).foregroundStyle(.secondary)
-                            }
-                        }.padding(.horizontal, 20).padding(.vertical, 12)
-                        Divider()
-                    }
-                    DisclosureGroup("历史用量", isExpanded: $state.historyExpanded) {
-                        EntryRows(entries: data.history).padding(.top, 10)
-                    }.padding(.horizontal, 20).padding(.vertical, 12)
+            VStack(alignment: .leading, spacing: 0) {
+                if !data.warnings.isEmpty {
+                    Text(data.warnings.joined(separator: "；"))
+                        .font(.system(size: 12)).lineLimit(2)
+                        .padding(.horizontal, 18).padding(.vertical, 6)
                 }
+                rates
+                if state.layoutHasDevice && data.phase != .hidden {
+                    Divider().padding(.horizontal, 18)
+                    quota
+                }
+                Divider().padding(.horizontal, 18)
+                chart
             }
-            Divider()
-            HStack {
-                Button { onAction(.settings) } label: { Label("设置", systemImage: "gearshape") }
-                    .keyboardShortcut(",", modifiers: .command)
-                Spacer()
-                Button { onAction(.refresh) } label: { Label("刷新", systemImage: "arrow.clockwise") }
-                    .keyboardShortcut("r", modifiers: .command)
-                Menu {
-                    Button("打开配置文件") { onAction(.config) }
-                    Button("打开数据目录") { onAction(.data) }
-                    Divider()
-                    Button("退出") { onAction(.quit) }
-                } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton)
-                    .fixedSize().accessibilityLabel("更多操作")
-            }.buttonStyle(.borderless).padding(.horizontal, 20).padding(.vertical, 12)
         }
-        .font(.system(size: 13)).foregroundStyle(.primary)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .frame(width: 390, height: state.panelHeight)
+        .font(.system(size: 13)).foregroundColor(Color(nsColor: .labelColor))
+        .frame(width: 360)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(height: state.fixedHeight, alignment: .top)
+        .clipped()
+
         .transaction { $0.animation = nil }
     }
 
@@ -116,19 +84,19 @@ struct DashboardCard: View {
                 Spacer()
                 Text(data.networkName).fontWeight(.medium).lineLimit(1).help(data.networkName)
             }
-            Text("本网络累计　\(data.localTotal)").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("本网络累计　\(data.localTotal)").font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             if !data.localAvailable {
-                Text("等待有效的本机速率采样").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("等待有效的本机速率采样").font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             }
-        }.padding(.horizontal, 20).padding(.vertical, 12)
+        }.padding(.horizontal, 18).padding(.vertical, 10)
     }
 
     private func rate(_ rate: DashboardSnapshot.Rate, label: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(label).font(.system(size: 12)).foregroundStyle(.secondary)
+            Text(label).font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(rate.value).font(.system(size: 27, weight: .semibold)).monospacedDigit()
-                Text(rate.unit).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(rate.value).font(.system(size: 23, weight: .semibold)).monospacedDigit()
+                Text(rate.unit).font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -138,18 +106,18 @@ struct DashboardCard: View {
             sectionTitle("SIM 卡月度套餐", caption: "估算")
             HStack(alignment: .bottom) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("剩余").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("剩余").font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor))
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
                         Text(data.remainingGB.map { String(format: "%.2f", $0) } ?? "—")
-                            .font(.system(size: 31, weight: .semibold)).monospacedDigit()
+                            .font(.system(size: 26, weight: .semibold)).monospacedDigit()
                         Text("GB").font(.system(size: 13))
                     }
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(data.remainingPercent.map { String(format: "%.2f%%", $0) } ?? "—")
-                        .font(.system(size: 18, weight: .medium)).monospacedDigit()
-                    Text("剩余占比").font(.system(size: 11)).foregroundStyle(.secondary)
+                        .font(.system(size: 16, weight: .medium)).monospacedDigit()
+                    Text("剩余占比").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
                 }.padding(.bottom, 3)
             }
             GeometryReader { proxy in
@@ -164,19 +132,19 @@ struct DashboardCard: View {
                 Text(data.usedBytes.map { "\(data.remainingGB == nil ? "月度已记录" : "已用") \(Fmt.bytes($0)) / \(Fmt.trim(data.quotaGB)) GB" }
                     ?? "套餐 \(Fmt.trim(data.quotaGB)) GB（手动设置）")
                 Spacer(minLength: 5)
-                Text(data.reset).foregroundStyle(.secondary)
+                Text(data.reset).foregroundColor(Color(nsColor: .secondaryLabelColor))
             }.font(.system(size: 12))
             if !data.quotaNotice.isEmpty {
                 Text(data.quotaNotice).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
             }
             if !data.period.isEmpty {
-                Text(data.period).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(data.period).font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             }
-            Text("余量以运营商查询结果为准").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("余量以运营商查询结果为准").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             if !data.signal.isEmpty {
                 HStack { Text(data.signal); Spacer(); Text(data.stationCount) }.font(.system(size: 12))
             }
-        }.padding(.horizontal, 20).padding(.vertical, 14)
+        }.padding(.horizontal, 18).padding(.vertical, 10)
     }
 
     private var chart: some View {
@@ -186,69 +154,137 @@ struct DashboardCard: View {
             HStack(alignment: .top, spacing: 5) {
                 VStack(alignment: .leading) {
                     Text(scale.label(scale.ceiling)); Spacer(); Text(scale.label(scale.ceiling / 2)); Spacer(); Text("0")
-                }.font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 30, height: 95)
+                }.font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor)).frame(width: 30, height: 75)
                 ForEach(data.days) { day in
-                    Button { state.selectedDay = day.id } label: {
-                        VStack(spacing: 5) {
-                            ZStack(alignment: .bottom) {
-                                Color.clear
-                                if let total = day.total, total > 0 {
-                                    RoundedRectangle(cornerRadius: 3).fill(DashboardPalette.teal)
-                                        .opacity(state.inspectedDay?.id == day.id ? 1 : 0.55)
-                                        .frame(width: 23, height: 95 * scale.fraction(total))
-                                } else {
-                                    Text(day.total == nil ? "—" : "0").font(.system(size: 11)).foregroundStyle(.secondary)
-                                }
-                            }.frame(height: 95)
-                            Text(day.shortLabel).font(.system(size: 11, weight: state.inspectedDay?.id == day.id ? .semibold : .regular))
-                                .foregroundStyle(.secondary)
-                        }.frame(maxWidth: .infinity)
-                    }.buttonStyle(.plain).help(day.detail).accessibilityLabel(day.detail)
+                    VStack(spacing: 5) {
+                        ZStack(alignment: .bottom) {
+                            Color.clear
+                            if let total = day.total, total > 0 {
+                                RoundedRectangle(cornerRadius: 3).fill(DashboardPalette.teal)
+                                    .opacity(state.inspectedDay?.id == day.id ? 1 : 0.55)
+                                    .frame(width: 23, height: 75 * scale.fraction(total))
+                            } else {
+                                Text(day.total == nil ? "—" : "0").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+                            }
+                        }.frame(height: 75)
+                        Text(day.shortLabel).font(.system(size: 11, weight: state.inspectedDay?.id == day.id ? .semibold : .regular))
+                            .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                    }.frame(maxWidth: .infinity).help(day.detail).accessibilityLabel(day.detail)
                 }
             }.padding(.top, 3)
+                .background(ChartTrackingRegion(state: state))
             Text(state.inspectedDay?.detail ?? "尚未取得当前网络记录").font(.system(size: 12)).monospacedDigit()
-            Text("— 表示未记录，仅含 App 的有效采样").font(.system(size: 11)).foregroundStyle(.secondary)
-        }.padding(.horizontal, 20).padding(.vertical, 14)
+            Text("— 表示未记录，仅含 App 的有效采样").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+        }.padding(.horizontal, 18).padding(.vertical, 10)
     }
 
     private func sectionTitle(_ title: String, caption: String) -> some View {
-        HStack { Text(title).fontWeight(.semibold); Spacer(); Text(caption).font(.system(size: 12)).foregroundStyle(.secondary) }
+        HStack { Text(title).fontWeight(.semibold); Spacer(); Text(caption).font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor)) }
     }
 }
 
-private struct EntryRows: View {
-    let entries: [MenuEntry]
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
-                if entry.isSeparator { Divider() }
-                else if let children = entry.children {
-                    Text(entry.title).fontWeight(.medium)
-                    EntryRows(entries: children).padding(.leading, 8)
-                } else { Text(entry.title.trimmingCharacters(in: .whitespaces)).textSelection(.enabled) }
+private struct ChartTrackingRegion: NSViewRepresentable {
+    let state: DashboardCardState
+    func makeNSView(context: Context) -> ChartRegionNSView { ChartRegionNSView(state: state) }
+    func updateNSView(_ view: ChartRegionNSView, context: Context) { view.reportFrame() }
+}
+
+private final class ChartRegionNSView: NSView {
+    weak var state: DashboardCardState?
+    init(state: DashboardCardState) { self.state = state; super.init(frame: .zero) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() { super.layout(); reportFrame() }
+    override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); reportFrame() }
+    override func setFrameOrigin(_ newOrigin: NSPoint) { super.setFrameOrigin(newOrigin); reportFrame() }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); reportFrame() }
+    func reportFrame() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        var ancestor = superview
+        while let view = ancestor {
+            if let card = view as? DashboardMenuCardView {
+                state?.chartRect = convert(bounds, to: card); return
             }
-        }.font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
+            ancestor = view.superview
+        }
     }
 }
 
-/// NSHostingController 与状态对象只创建一次，采样不会替换正在浏览的界面。
-final class DashboardPopover {
+final class DashboardCardHostingView: NSHostingView<DashboardCard> {
+    override var allowsVibrancy: Bool { false }
+    override var isOpaque: Bool { false }
+}
+
+/// 透明的原生菜单行。高度只在打开前测量，刷新时保持菜单与行对象稳定。
+final class DashboardMenuCardView: NSView {
+    let state: DashboardCardState
+    let hosting: DashboardCardHostingView
+    private let version: String
+    private var measuredSize = NSSize(width: 360, height: 1)
+    private var pointerTracking: NSTrackingArea?
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+    override var intrinsicContentSize: NSSize { measuredSize }
+
+    init(state: DashboardCardState, version: String) {
+        self.state = state; self.version = version
+        hosting = DashboardCardHostingView(rootView: DashboardCard(state: state, version: version))
+        super.init(frame: .zero)
+        addSubview(hosting)
+        hosting.autoresizingMask = [.width, .height]
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func measureForOpening() {
+        state.fixedHeight = nil
+        state.layoutHasDevice = state.snapshot.phase != .hidden
+        // 在菜单未展开时建立当前布局；承载视图和状态对象始终复用。
+        hosting.rootView = DashboardCard(state: state, version: version)
+        hosting.frame = NSRect(x: 0, y: 0, width: 360, height: 1)
+        hosting.layoutSubtreeIfNeeded()
+        measuredSize = NSSize(width: 360, height: ceil(hosting.fittingSize.height))
+        state.fixedHeight = measuredSize.height
+        frame.size = measuredSize; hosting.frame = bounds
+        invalidateIntrinsicContentSize()
+    }
+    override func layout() { super.layout(); hosting.frame = bounds }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); window?.acceptsMouseMovedEvents = true }
+    override func updateTrackingAreas() {
+        if let tracking = pointerTracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.inVisibleRect, .activeAlways, .mouseMoved, .mouseEnteredAndExited], owner: self)
+        addTrackingArea(area); pointerTracking = area
+        super.updateTrackingAreas()
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
+    override func mouseMoved(with event: NSEvent) { inspect(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseEntered(with event: NSEvent) { inspect(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseExited(with event: NSEvent) { state.selectedDay = nil }
+    override func mouseDown(with event: NSEvent) { inspect(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseUp(with event: NSEvent) { inspect(at: convert(event.locationInWindow, from: nil)) }
+    func inspect(at point: NSPoint) {
+        let plot = state.chartRect
+        let left = plot.minX + 35
+        guard plot.contains(point), point.x >= left, plot.width > 35, !state.snapshot.days.isEmpty else {
+            state.selectedDay = nil; return
+        }
+        let index = min(state.snapshot.days.count - 1, Int((point.x - left) / (plot.width - 35) * Double(state.snapshot.days.count)))
+        state.selectedDay = state.snapshot.days[index].id
+    }
+}
+
+final class DashboardCardMenuItem: NSMenuItem {
+    override var isHighlighted: Bool { false }
+}
+
+final class DashboardMenuCard {
     let state = DashboardCardState()
-    let popover = NSPopover()
-    init(version: String, onAction: @escaping (MenuEntry.Action) -> Void) {
-        popover.behavior = .transient
-        popover.animates = false
-        popover.contentViewController = NSHostingController(rootView: DashboardCard(state: state, version: version, onAction: onAction))
+    let view: DashboardMenuCardView
+    let item = DashboardCardMenuItem(title: "", action: nil, keyEquivalent: "")
+    init(version: String) {
+        view = DashboardMenuCardView(state: state, version: version)
+        item.view = view; item.isEnabled = true
     }
-    var isShown: Bool { popover.isShown }
-    func update(_ snapshot: DashboardSnapshot) { state.update(snapshot) }
-    func toggle(from button: NSStatusBarButton) {
-        if isShown { popover.performClose(nil); return }
-        let available = button.window?.screen?.visibleFrame.height ?? 800
-        state.panelHeight = min(state.snapshot.phase == .hidden ? 560 : 740, max(320, available - 70))
-        popover.contentSize = NSSize(width: 390, height: state.panelHeight)
-        NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    func update(_ snapshot: DashboardSnapshot, allowResize: Bool) {
+        state.update(snapshot)
+        if allowResize { view.measureForOpening() }
     }
-    func close() { popover.performClose(nil) }
 }
