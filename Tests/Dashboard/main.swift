@@ -4,8 +4,8 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let now = ISO8601DateFormatter().date(from: "2026-10-14T09:00:00+08:00")!
 var config = Config(); config.quotaGB = 200; config.billingCycleDay = 1
-let pro = NetworkContext(interface: "en0", gateway: "192.168.0.1", dns: "192.168.0.1", gatewayMAC: "01:02:03:04:05:06")
-let home = NetworkContext(interface: "en7", gateway: "192.168.0.1", dns: "192.168.0.1", gatewayMAC: "11:12:13:14:15:16")
+let pro = NetworkContext(interface: "en0", gateway: "192.168.0.1", dns: "192.168.0.1", gatewayMAC: "01:02:03:04:05:06", localIP: "192.168.0.100")
+let home = NetworkContext(interface: "en7", gateway: "192.168.0.1", dns: "192.168.0.1", gatewayMAC: "11:12:13:14:15:16", localIP: "192.168.0.102")
 var tracker = TrafficTracker()
 tracker.sample(context: pro, counters: InterfaceCounters(rx: 1000, tx: 100), uptime: 0, date: now, maxGap: 30)
 tracker.setLabel("F50 Pro", for: pro.key)
@@ -39,6 +39,21 @@ tracker.state.daily["2026-11-01"] = [pro.key: Usage(rx: 88_000_000_000)]
 let encodedBefore = try JSONEncoder().encode(tracker.state)
 var first = snapshot()
 first.warnings = []
+expect(first.networkAddress == "en0 · 192.168.0.100" && first.gateway == "192.168.0.1",
+       "current network displays the local address separately from the gateway even with a saved name")
+var renewed = pro; renewed.localIP = "192.168.0.105"
+var renewedTracker = tracker
+renewedTracker.sample(context: renewed, counters: InterfaceCounters(rx: 1000, tx: 100), uptime: 2, date: now, maxGap: 30)
+let renewedSnapshot = DashboardSnapshot.make(tracker: renewedTracker, router: RouterState(), config: config, date: now)
+expect(renewedSnapshot.networkAddress == "en0 · 192.168.0.105" && renewed.key == pro.key,
+       "DHCP address changes refresh the display without creating another network bucket")
+expect(renewedTracker.state.buckets == tracker.state.buckets,
+       "DHCP address changes preserve existing network usage")
+var missingAddress = pro; missingAddress.localIP = ""
+renewedTracker.sample(context: missingAddress, counters: nil, uptime: 3, date: now, maxGap: 30)
+let missingSnapshot = DashboardSnapshot.make(tracker: renewedTracker, router: RouterState(), config: config, date: now)
+expect(missingSnapshot.networkAddress == "en0 · 本机 IPv4 未获取" && missingSnapshot.gateway == pro.gateway,
+       "missing local address clears the previous IP without substituting the gateway")
 expect(first.phase == .ready, "confirmed current Pro creates quota card")
 expect(abs(first.remainingGB! - 172.97) < 0.000001, "remaining comes from calibrated SIM baseline")
 expect(first.usedBytes == 27_030_000_000, "SIM baseline does not use raw router counter")
@@ -134,6 +149,7 @@ tracker.setLabel("F50 Pro", for: home.key)
 popup.update(snapshot(), allowResize: false)
 expect(popup.state.snapshot.phase == .hidden && popup.state.snapshot.details.isEmpty
        && popup.state.snapshot.remainingGB == nil && popup.state.snapshot.warnings.isEmpty, "home router with Pro alias hides the device card and warnings")
+expect(popup.state.snapshot.networkAddress == "en7 · 192.168.0.102", "switching interfaces replaces the previous local address")
 expect(popup.state.selectedDay == "2026-10-13", "network switch retains all-network monthly browsing")
 expect(popup.state.snapshot.days[12].hasRouterTraffic && popup.state.snapshot.days[11].routerTotal == 0,
        "other networks keep Pro history visible and a user alias cannot manufacture Pro identity")
@@ -208,6 +224,10 @@ if CommandLine.arguments.contains("--render") {
     unavailable.usedBytes = nil; unavailable.signal = ""; unavailable.quotaNotice = "设备数据暂不可用，等待下次刷新"; unavailable.details = []
     try capture("unavailable", .aqua, unavailable)
     try capture("home", .aqua, snapshot())
+    try capture("missing-address", .aqua, missingSnapshot)
+    var longAddress = first
+    longAddress.networkAddress = "en15 · 192.168.100.254"; longAddress.gateway = "192.168.100.1"
+    try capture("long-address", .aqua, longAddress)
     let february = DashboardSnapshot.make(tracker: TrafficTracker(), router: RouterState(), config: config,
         date: ISO8601DateFormatter().date(from: "2024-02-18T09:00:00+08:00")!)
     try capture("february", .aqua, february)

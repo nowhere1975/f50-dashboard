@@ -35,7 +35,13 @@ enum SysInfo {
         let servers = dns["ServerAddresses"] as? [String] ?? []
         let mac = (ipv4["ARPResolvedIPAddress"] as? String == gateway)
             ? normalizeMAC(ipv4["ARPResolvedHardwareAddress"] as? String ?? "") : ""
-        return NetworkContext(interface: iface, gateway: gateway, dns: servers.joined(separator: ","), gatewayMAC: mac)
+        return NetworkContext(interface: iface, gateway: gateway, dns: servers.joined(separator: ","), gatewayMAC: mac,
+                              localIP: localIPv4(ipv4, interface: iface))
+    }
+
+    static func localIPv4(_ ipv4: [String: Any], interface: String) -> String {
+        guard !interface.isEmpty, ipv4["InterfaceName"] as? String == interface else { return "" }
+        return (ipv4["Addresses"] as? [String])?.first(where: { !$0.isEmpty }) ?? ""
     }
 
     static func normalizeMAC(_ value: String) -> String {

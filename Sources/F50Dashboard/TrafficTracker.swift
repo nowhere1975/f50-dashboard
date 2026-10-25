@@ -113,6 +113,12 @@ struct NetworkContext: Equatable {
     let gateway: String
     let dns: String
     let gatewayMAC: String
+    var localIP: String = ""
+
+    var localAddressLabel: String {
+        guard !interface.isEmpty else { return "未连接网络" }
+        return "\(interface) · \(localIP.isEmpty ? "本机 IPv4 未获取" : localIP)"
+    }
 
     var key: String {
         if !gatewayMAC.isEmpty { return "mac:\(gatewayMAC)" }

@@ -16,6 +16,7 @@ func printCheck() -> Bool {
     let context = SysInfo.networkContext(interface: config.interface)
     print("── 网络（原生系统接口）──")
     print("  当前网卡    \(context.interface.isEmpty ? "无" : context.interface)")
+    print("  本机 IPv4   \(context.localIP.isEmpty ? "未获取" : context.localIP)")
     print("  网关 / DNS  \(context.gateway) / \(context.dns)")
     print("  网关 MAC    \(context.gatewayMAC.isEmpty ? "未获取，使用网关与 DNS 兜底" : context.gatewayMAC)")
     print("  网络标识    \(context.key)")

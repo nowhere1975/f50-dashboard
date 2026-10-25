@@ -30,6 +30,8 @@ enum DashboardMenu {
         if let context = tracker.context {
             let bucket = tracker.state.buckets[context.key] ?? Bucket()
             add("当前网络      \(name(context.key, tracker: tracker, config: config))")
+            add("  本机地址    \(context.localAddressLabel)")
+            add("  网关        \(context.gateway.isEmpty ? "未获取" : context.gateway)")
             add("  本网络累计  ↓ \(Fmt.bytes(bucket.rx))   ↑ \(Fmt.bytes(bucket.tx))")
             add("  本次连接    \(Fmt.duration(since: tracker.connectedSince, now: date))")
             add("  开始统计    \(DateFormatter.localizedString(from: bucket.firstSeen, dateStyle: .short, timeStyle: .short))")

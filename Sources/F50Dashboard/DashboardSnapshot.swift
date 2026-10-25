@@ -30,6 +30,8 @@ struct DashboardSnapshot: Equatable {
     }
     var networkKey = ""
     var networkName = "等待系统网络信息"
+    var networkAddress = "等待系统网络信息"
+    var gateway = ""
     var interface = ""
     var localTotal = "—"
     var localAvailable = false
@@ -71,6 +73,8 @@ struct DashboardSnapshot: Equatable {
         if let context = tracker.context {
             value.networkKey = context.key; value.interface = context.interface
             value.networkName = DashboardMenu.name(context.key, tracker: tracker, config: config)
+            value.networkAddress = context.localAddressLabel
+            value.gateway = context.gateway
             let bucket = tracker.state.buckets[context.key] ?? Bucket()
             value.localTotal = "↓ \(Fmt.bytes(bucket.rx))   ↑ \(Fmt.bytes(bucket.tx))"
         }

@@ -79,10 +79,16 @@ struct DashboardCard: View {
                 rate(data.upload, label: "↑ 上传")
                 Spacer(minLength: 0)
             }
-            HStack {
+            HStack(alignment: .top) {
                 Label("当前网络", systemImage: "network")
                 Spacer()
-                Text(data.networkName).fontWeight(.medium).lineLimit(1).help(data.networkName)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(data.networkAddress).fontWeight(.medium).lineLimit(1)
+                        .help("\(data.networkName)\n\(data.networkAddress)")
+                    Text("网关 \(data.gateway.isEmpty ? "未获取" : data.gateway)")
+                        .font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
+                        .lineLimit(1)
+                }
             }
             Text("本网络累计　\(data.localTotal)").font(.system(size: 12)).foregroundColor(Color(nsColor: .secondaryLabelColor))
             if !data.localAvailable {

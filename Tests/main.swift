@@ -47,6 +47,13 @@ try fallback.save(to: configURL)
 let object = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as! [String: Any]
 expect(object["extensionKey"] as? String == "keep-me", "settings preserve extension keys")
 
+let ipv4State: [String: Any] = ["InterfaceName": "en0", "Addresses": ["192.168.0.100"], "Router": "192.168.0.1"]
+expect(SysInfo.localIPv4(ipv4State, interface: "en0") == "192.168.0.100", "local IP comes from Addresses, not Router")
+expect(SysInfo.localIPv4(ipv4State, interface: "en7").isEmpty, "manual interface cannot borrow another interface's address")
+expect(SysInfo.localIPv4(["InterfaceName": "en0", "Router": "192.168.0.1"], interface: "en0").isEmpty,
+       "missing address never falls back to gateway")
+expect(SysInfo.localIPv4([:], interface: "").isEmpty, "offline network has no local address")
+
 let f50 = NetworkContext(interface: "en0", gateway: "192.168.0.1", dns: "192.168.0.1", gatewayMAC: "01:02:03:04:05:06")
 let home = NetworkContext(interface: "en7", gateway: "192.168.0.1", dns: "192.168.0.1", gatewayMAC: "11:12:13:14:15:16")
 let date = Date(timeIntervalSince1970: 1_700_000_000)
