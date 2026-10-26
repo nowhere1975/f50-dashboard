@@ -46,6 +46,12 @@ struct DashboardSnapshot: Equatable {
     var remainingGB: Double?
     var remainingPercent: Double?
     var usedBytes: UInt64?
+    /// Only calibrated, currently valid estimates can populate the quota progress.
+    var usedPercent: Double? {
+        guard remainingPercent != nil, let usedBytes = usedBytes, quotaGB.isFinite, quotaGB > 0 else { return nil }
+        return Double(usedBytes) / Fmt.giga / quotaGB * 100
+    }
+    var usedFraction: Double? { usedPercent.map { min(1, max(0, $0 / 100)) } }
     var period = ""
     var reset = ""
     var quotaNotice = ""

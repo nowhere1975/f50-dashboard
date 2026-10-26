@@ -33,9 +33,9 @@ struct DashboardCard: View {
     @ObservedObject var state: DashboardCardState
     let version: String
     private var data: DashboardSnapshot { state.snapshot }
-    private var accent: Color {
-        guard let remaining = data.remainingPercent else { return .secondary }
-        return remaining <= 10 ? .red : remaining <= 20 ? .orange : DashboardPalette.teal
+    private var remainingColor: Color {
+        guard let remaining = data.remainingPercent else { return .primary }
+        return remaining <= 10 ? .red : remaining <= 20 ? .orange : .primary
     }
 
     var body: some View {
@@ -117,30 +117,30 @@ struct DashboardCard: View {
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
                             Text(data.remainingGB.map { String(format: "%.2f", $0) } ?? "—")
                                 .font(.system(size: 26, weight: .semibold)).monospacedDigit()
+                                .foregroundColor(remainingColor)
                             Text("GB").font(.system(size: 13))
                         }
                     }
                     Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(data.remainingPercent.map { String(format: "%.2f%%", $0) } ?? "—")
-                            .font(.system(size: 16, weight: .medium)).monospacedDigit()
-                        Text("剩余占比").font(.system(size: 11)).foregroundColor(Color(nsColor: .secondaryLabelColor))
-                    }.padding(.bottom, 3)
+                    Text(data.reset).font(.system(size: 12))
+                        .foregroundColor(Color(nsColor: .secondaryLabelColor)).padding(.bottom, 3)
                 }
+                HStack(alignment: .firstTextBaseline) {
+                    Text(data.usedBytes.map { "本月已用 \(Fmt.bytes($0)) / \(Fmt.trim(data.quotaGB)) GB" }
+                        ?? "套餐 \(Fmt.trim(data.quotaGB)) GB（手动设置）")
+                    Spacer(minLength: 5)
+                    Text(data.usedPercent.map { String(format: "%.2f%%", $0) } ?? "—")
+                        .monospacedDigit()
+                        .accessibilityLabel(data.usedPercent.map { "已用占比 \(String(format: "%.2f", $0))%" } ?? "已用占比暂不可用")
+                }.font(.system(size: 12))
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.08))
-                        RoundedRectangle(cornerRadius: 4).fill(accent)
-                            .frame(width: proxy.size.width * (data.remainingPercent ?? 0) / 100)
+                        RoundedRectangle(cornerRadius: 4).fill(DashboardPalette.teal)
+                            .frame(width: proxy.size.width * (data.usedFraction ?? 0))
                     }
                 }.frame(height: 8)
-                    .accessibilityLabel(data.remainingPercent.map { "月度套餐剩余 \(String(format: "%.2f", $0))%" } ?? "套餐余量暂不可用")
-                HStack(alignment: .top) {
-                    Text(data.usedBytes.map { "本月用量 \(Fmt.bytes($0)) / \(Fmt.trim(data.quotaGB)) GB" }
-                        ?? "套餐 \(Fmt.trim(data.quotaGB)) GB（手动设置）")
-                    Spacer(minLength: 5)
-                    Text(data.reset).foregroundColor(Color(nsColor: .secondaryLabelColor))
-                }.font(.system(size: 12))
+                    .accessibilityLabel(data.usedPercent.map { "月度套餐已用 \(String(format: "%.2f", $0))%" } ?? "套餐已用占比暂不可用")
             } else { sectionTitle(data.deviceName, caption: "路由器") }
             if !data.signal.isEmpty || !data.stationCount.isEmpty {
                 HStack { Text(data.signal); Spacer(); Text(data.stationCount) }.font(.system(size: 12))
@@ -180,8 +180,8 @@ struct DashboardCard: View {
                     }
                 }.zIndex(1)
             HStack(spacing: 12) {
-                legend(data.routerTrafficLabel, filled: true, color: DashboardPalette.teal)
-                legend("无路由器用量", filled: true, color: Color.primary.opacity(0.12))
+                legend("有 \(data.routerTrafficLabel) 用量", filled: true, color: DashboardPalette.teal)
+                legend("无 \(data.routerTrafficLabel) 用量", filled: true, color: Color.primary.opacity(0.12))
                 legend("未记录", filled: false, color: Color.secondary.opacity(0.4))
             }.font(.system(size: 10)).foregroundColor(Color(nsColor: .secondaryLabelColor))
         }.padding(.horizontal, 18).padding(.vertical, 10)

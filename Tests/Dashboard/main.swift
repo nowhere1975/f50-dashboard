@@ -57,6 +57,13 @@ expect(missingSnapshot.networkAddress == "en0 · 本机 IPv4 未获取" && missi
 expect(first.phase == .ready, "confirmed current Pro creates quota card")
 expect(abs(first.remainingGB! - 172.97) < 0.000001, "remaining comes from calibrated SIM baseline")
 expect(first.usedBytes == 27_030_000_000, "SIM baseline does not use raw router counter")
+expect(abs(first.usedPercent! - 13.515) < 0.000001 && abs(first.usedFraction! - 0.13515) < 0.000001,
+       "quota progress represents calibrated usage, not remaining capacity")
+var zeroUsage = first; zeroUsage.usedBytes = 0; zeroUsage.remainingGB = 200; zeroUsage.remainingPercent = 100
+expect(zeroUsage.usedPercent == 0 && zeroUsage.usedFraction == 0, "unused quota has a valid zero percent and empty bar")
+var uncalibrated = first; uncalibrated.remainingGB = nil; uncalibrated.remainingPercent = nil
+expect(uncalibrated.usedBytes != nil && uncalibrated.usedPercent == nil && uncalibrated.usedFraction == nil,
+       "recorded bytes without a valid estimate cannot populate quota progress")
 expect(first.reset == "11 月 1 日重置", "reset uses next cycle boundary in billing timezone")
 expect(first.days.count == 31 && first.days[13].isToday && first.days.last!.isFuture, "month includes every date and distinguishes today and future")
 expect(first.days.first!.total == nil, "unrecorded dates stay unknown")
@@ -136,9 +143,11 @@ popup.update(snapshot(), allowResize: false)
 expect(popup.state.snapshot.remainingGB != nil, "recovery restores current estimate")
 var gap = tracker.state.billing[pro.key]!.values.first!; gap.hasGap = true
 tracker.state.billing[pro.key]![gap.period.key] = gap
-expect(snapshot().remainingGB == nil && snapshot().quotaNotice.contains("缺口"), "sampling gap never displays a confident balance")
+expect(snapshot().remainingGB == nil && snapshot().usedPercent == nil && snapshot().quotaNotice.contains("缺口"),
+       "sampling gap never displays a confident balance or usage percentage")
 try tracker.sampleBilling(info, key: pro.key, config: config, date: now, calibratedGB: 210)
-expect(snapshot().remainingGB == 0 && snapshot().remainingPercent == 0, "over-quota use clamps progress and balance to zero")
+expect(snapshot().remainingGB == 0 && snapshot().remainingPercent == 0 && snapshot().usedPercent == 105 && snapshot().usedFraction == 1,
+       "over-quota use keeps the actual percentage while capping the filled bar and remaining balance")
 var noCounts = info; noCounts.counterRx = nil
 request = router.begin(network: pro, gateway: pro.gateway)
 router.accept(noCounts, request: request, current: pro, date: now)
@@ -216,6 +225,16 @@ if CommandLine.arguments.contains("--render") {
     popup.state.selectedDay = nil
     try capture("light", .aqua, first)
     try capture("dark", .darkAqua, first)
+    try capture("zero-usage", .aqua, zeroUsage)
+    try capture("uncalibrated", .aqua, uncalibrated)
+    for (name, usedGB) in [("low-quota", 160.0), ("critical-quota", 180.0), ("over-quota", 210.0)] {
+        var warning = first
+        warning.usedBytes = UInt64(usedGB * Fmt.giga)
+        warning.remainingGB = max(0, 200 - usedGB)
+        warning.remainingPercent = warning.remainingGB! / 2
+        try capture(name, .aqua, warning)
+        try capture(name + "-dark", .darkAqua, warning)
+    }
     popup.state.selectedDay = "2026-10-13"
     try capture("hover-f50", .aqua, first)
     popup.state.selectedDay = "2026-10-12"
